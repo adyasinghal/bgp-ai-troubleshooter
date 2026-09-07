@@ -1,6 +1,8 @@
 # Real-Time AI Network Troubleshooter for BGP Switches
 
 <!--
+Suggested repo structure
+
 real-time-ai-network-troubleshooter/
 │
 ├── .github/
