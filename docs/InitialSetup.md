@@ -47,7 +47,7 @@ sudo usermod -aG docker $USER
 \# Containerlab
 
 ```bash
-sudo bash -c "$(curl -sL <https://get.containerlab.dev>)"
+sudo bash -c "$(curl -sL https://get.containerlab.dev)"
 
 containerlab version
 
