@@ -73,7 +73,7 @@ The plain FRR image is only the routing brain — it has no SSH server, so the R
 
 \# Inside the VM
 
-cd /Users/adyasinghal/HPE-CPP/network-lab
+cd /Users/adyasinghal/HPE-CPP/bgp-ai-troubleshooter
 
 
 \# Create a file named `Dockerfile` in this folder:
@@ -149,8 +149,7 @@ sudo containerlab deploy -t topology.clab.yml
 
 ### Accessing the routers
 
-There are two ways to reach a router. SSH is what the REST tool uses; docker
-exec is a handy manual shortcut.
+There are two ways to reach a router. SSH is what the REST tool uses; docker exec is a handy manual shortcut.
 
 \# Over SSH (credentials: admin / admin). Quote the whole remote command:
 
