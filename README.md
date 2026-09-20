@@ -3,49 +3,37 @@
 <!--
 Suggested repo structure
 
-real-time-ai-network-troubleshooter/
-│
-├── .github/
-│   └── workflows/
-│       └── ci.yml                  # CI/CD pipeline automation
-│
+
+bgp-ai-troubleshooter/            
 ├── docs/
-│   ├── architecture.md                 # System architecture and workflow details
-│   ├── Pre-requisites.md               # Study notes on BGP, Netmiko, TextFSM, etc.
-│   └── project_overview.md             # CPP-2 high-level timeline and milestones
-│   └── InitialSetup.md                 # Setup Instructions
-│
+│   ├── project_overview.md       
+│   ├── InitialSetup.md                     # Setup Instructions       
+│   ├── Pre-requisites.md                   # Study notes on BGP         
 ├── lab/
-│   ├── containerlab/               # Containerlab topologies (FRRouting, etc.)
-│   └── scripts/                    # Quick experimentation scripts for switches
-│
-├── src/
+│   └── containerlab/                       # Containerlab topologies (FRRouting, etc.)
+│       ├── Dockerfile            
+│       └── topology.clab.yml     
+├── tools/                        
+│   ├── __init__.py  base_tool.py  device_client.py
+│   ├── bgp_state.py  interface.py  tcp_port.py  config.py
+├── rules_db/                     
+│   ├── __init__.py  rules_db.py  schema.sql
+├── api/                                    # SSH/API connection and command execution
+│   ├── __init__.py  main.py
+├── analyzer/                               # ML engine and rule-based diagnostics
 │   ├── __init__.py
-│   ├── collector/                  # SSH/API connection and command execution
-│   │   ├── __init__.py
-│   │   ├── ssh_client.py
-│   │   └── api_client.py
-│   ├── parser/                     # CLI output parsing templates & logic
-│   │   ├── __init__.py
-│   │   └── textfsm_parser.py
-│   ├── analyzer/                   # ML engine and rule-based diagnostics
-│   │   ├── __init__.py
-│   │   └── ml_engine.py
-│   └── dashboard/                  # Flask or Streamlit UI code
-│       ├── __init__.py
-│       └── app.py
-│
-├── tests/                          # Unit and integration tests
-│   ├── __init__.py
-│   ├── test_collector.py
-│   └── test_parser.py
-│
-├── notebooks/                      # Jupyter notebooks for data exploration & ML training
-│   └── bgp_data_exploration.ipynb
-│
+│   ├── rest_client.py            (calls API over HTTP)
+│   ├── triage.py                 (question → starting intent)
+│   ├── rules_engine.py           (the reasoning loop)
+│   ├── verdict.py                (builds root_cause/fix output)
+│   └── ml_engine.py              (scikit-learn)
+├── dashboard/                              # Flask or Streamlit UI code
+│   └── __init__.py
+├── tests/
+│   ├── __init__.py  test_tools.py  test_analyzer.py
 ├── .gitignore
-├── README.md                       # Project title, badges, setup instructions
-├── requirements.txt                # Python dependencies (Netmiko, Pandas, Streamlit, etc.)
-└── setup.py                        # Package installation setup
+├── requirements.txt                        # Python dependencies
+├── README.md
+└── setup.py                                # Package installation setup
 -->
 
