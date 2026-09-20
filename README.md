@@ -10,9 +10,10 @@ real-time-ai-network-troubleshooter/
 │       └── ci.yml                  # CI/CD pipeline automation
 │
 ├── docs/
-│   ├── architecture.md             # System architecture and workflow details
-│   ├── prerequisites.md            # Study notes on BGP, Netmiko, TextFSM, etc.
-│   └── program_plan.md             # CPP-2 high-level timeline and milestones
+│   ├── architecture.md                 # System architecture and workflow details
+│   ├── Pre-requisites.md               # Study notes on BGP, Netmiko, TextFSM, etc.
+│   └── project_overview.md             # CPP-2 high-level timeline and milestones
+│   └── InitialSetup.md                 # Setup Instructions
 │
 ├── lab/
 │   ├── containerlab/               # Containerlab topologies (FRRouting, etc.)
