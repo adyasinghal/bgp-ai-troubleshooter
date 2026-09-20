@@ -1,0 +1,20 @@
+# Two connected routers running FRR, now built from the custom "frr-ssh" image
+# (see ./Dockerfile) so each router comes up already reachable over SSH on
+# port 22 as admin/admin, with the BGP daemon enabled. The exec line just
+# starts the SSH server after the container boots.
+
+name: bgp-lab
+topology:
+  nodes:
+    router1:
+      kind: linux
+      image: frr-ssh:8.5.2
+      exec:
+        - /usr/sbin/sshd
+    router2:
+      kind: linux
+      image: frr-ssh:8.5.2
+      exec:
+        - /usr/sbin/sshd
+  links:
+    - endpoints: ["router1:eth1", "router2:eth1"]
