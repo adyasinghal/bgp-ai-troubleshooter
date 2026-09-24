@@ -2,6 +2,7 @@
 
 Suggested repo structure  
 
+```
 bgp-ai-troubleshooter/              
 ├── docs/  
 │   ├── GuideToRun.md                       # Instructions on how to run and test the tool  
@@ -36,6 +37,6 @@ bgp-ai-troubleshooter/
 ├── requirements.txt                        # Python dependencies  
 ├── README.md  
 └── setup.py                                # Package installation setup  
-
+```
 
 
