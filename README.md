@@ -31,12 +31,20 @@ bgp-ai-troubleshooter/
 │       ├── Dockerfile              
 │       └── topology.clab.yml       
 ├── tools/                          
-│   ├── __init__.py  base_tool.py  device_client.py  
-│   └── bgp_state.py  interface.py  tcp_port.py  config.py  
+│   ├── __init__.py
+│   ├── base_tool.py
+│   ├── bgp_state.py
+│   ├── config.py
+│   ├── device_client.py
+│   ├── interface.py
+│   └── tcp_port.py
 ├── rules_db/                       
-│   └── __init__.py  rules_db.py  schema.sql  
+│   ├── __init__.py
+│   ├── rules_db.py
+│   └── schema.sql
 ├── api/                                    # Tool Cohort REST API  
-│   └── __init__.py  main.py  
+│   ├── __init__.py
+│   └── main.py  
 ├── analyzer/                               # Deterministic Reasoning & AI Diagnosis  
 │   ├── __init__.py  
 │   ├── triage.py                           # Question → starting intent  
@@ -49,11 +57,11 @@ bgp-ai-troubleshooter/
 │   └── __init__.py  
 ├── tests/  
 │   ├── __init__.py  
-│   ├── test_tools.py  
 │   ├── test_analyzer.py  
-│   ├── test_triage.py  
 │   ├── test_api.py  
-│   └── test_llm_engine.py  
+│   ├── test_llm_engine.py  
+│   ├── test_tools.py  
+│   └── test_triage.py  
 ├── demo_llm_diagnosis.py                   # Demonstration & fallback script
 ├── .gitignore  
 ├── requirements.txt                        # Python dependencies  
