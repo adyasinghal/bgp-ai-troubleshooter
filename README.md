@@ -31,39 +31,26 @@ bgp-ai-troubleshooter/
 │       ├── Dockerfile              
 │       └── topology.clab.yml       
 ├── tools/                          
-│   ├── __init__.py
-│   ├── base_tool.py
-│   ├── bgp_state.py
-│   ├── config.py
-│   ├── device_client.py
-│   ├── interface.py
-│   └── tcp_port.py
+│   ├── \_\_init\_\_.py  base_tool.py  device_client.py  
+│   ├── bgp_state.py  interface.py  tcp_port.py  config.py 
 ├── rules_db/                       
-│   ├── __init__.py
-│   ├── rules_db.py
-│   └── schema.sql
-├── api/                                    # Tool Cohort REST API  
-│   ├── __init__.py
-│   └── main.py  
-├── analyzer/                               # Deterministic Reasoning & AI Diagnosis  
-│   ├── __init__.py  
-│   ├── triage.py                           # Question → starting intent  
-│   ├── rules_engine.py                     # Deterministic reasoning loop  
-│   ├── verdict.py                          # Authoritative root cause & audit trail  
-│   ├── llm_engine.py                       # LLM explanation layer (Gemini)  
-│   ├── rest_client.py                      # Calls Tool API over HTTP  
-│   └── run.py                              # CLI runner (`--llm`)  
-├── dashboard/                              # Optional UI code  
-│   └── __init__.py  
+│   ├── \_\_init\_\_.py  rules_db.py  schema.sql  
+├── api/                                    # SSH/API connection and command execution  
+│   ├── \_\_init\_\_.py  main.py  
+├── analyzer/                               # ML engine and rule-based diagnostics  
+│   ├── \_\_init\_\_.py  
+│   ├── rest_client.py            (calls API over HTTP)  
+│   ├── triage.py                 (question → starting intent)  
+│   ├── rules_engine.py           (the reasoning loop)  
+│   ├── verdict.py                (builds root_cause/fix output)  
+│   ├── ml_engine.py              (scikit-learn fault classifier)  
+│   └── llm_escalation.py         (hands unresolved cases to Claude)  
+├── dashboard/                              # Flask or Streamlit UI code  
+│   └── \_\_init\_\_.py  
 ├── tests/  
-│   ├── __init__.py  
-│   ├── test_analyzer.py  
-│   ├── test_api.py  
-│   ├── test_llm_engine.py  
-│   ├── test_tools.py  
-│   └── test_triage.py  
-├── demo_llm_diagnosis.py                   # Demonstration & fallback script
+│   ├── \_\_init\_\_.py  test_tools.py  test_analyzer.py  
 ├── .gitignore  
 ├── requirements.txt                        # Python dependencies  
-└── README.md
+├── README.md  
+└── setup.py                                # Package installation setup  
 ```

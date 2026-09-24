@@ -5,3 +5,4 @@ pydantic
 requests
 scikit-learn
 pandas
+anthropic>=1.8
