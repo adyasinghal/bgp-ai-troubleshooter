@@ -1,158 +1,143 @@
 # How to Run & Test the BGP AI Troubleshooter
 
 This guide takes you from a fresh machine to running the full workflow:
-lab → REST tools → Analyze stage.
-
-Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM.
-
-## Prerequisites (one-time)
-
-- OrbStack installed, with an Ubuntu VM named `clab` (see `InitialSetup.md`).
-- Docker + Containerlab installed inside that VM.
-- Python 3 + pip inside the VM.
-
-## Layout
-
-You'll use two terminals, both inside the VM (`orb -m clab`):
-- **Terminal 1** — runs the REST API (stays open).
-- **Terminal 2** — runs the tests and the analyzer.
+Containerlab environment → REST API Tool Cohort → Deterministic Reasoning & AI Diagnosis.
 
 ---
 
-## Step 1 — Enter the VM
+## 1. Prerequisites (One-Time Setup)
 
+- **Containerlab & Docker**: Installed on your Linux host / VM (see [InitialSetup.md](InitialSetup.md)).
+- **Python 3.10+** & `pip`.
+- **Gemini API Key** *(optional for `--llm` diagnosis)*.
+
+### Install Dependencies
+From the repository root:
 ```bash
-orb -m clab
-cd /Users/adyasinghal/HPE-CPP/bgp-ai-troubleshooter
+pip install -r requirements.txt google-genai python-dotenv pytest
 ```
 
-## Step 2 — Build the router image (once; rebuild only if the Dockerfile changes)
-
-```bash
-cd lab
-docker build -t frr-ssh:8.5.2 .
-cd ..
+### Configure Gemini AI (Optional for LLM Diagnosis)
+Create a `.env` file in the project root:
+```env
+LLM_API_KEY=your_gemini_api_key_here
+LLM_MODEL=gemini-3.5-flash-lite
+LLM_ENABLED=true
 ```
+*(If no API key is provided, the tool operates in deterministic rule-based mode or gracefully falls back).*
 
-## Step 3 — Deploy the lab
+---
 
-```bash
-sudo containerlab deploy -t lab/topology.clab.yml
-```
+## 2. Running Automated Tests (Offline Verification)
 
-Note the management IPs from the printed table — they can differ each deploy.
-This guide assumes **router1 = 172.20.20.2**, **router2 = 172.20.20.3**.
-Re-check anytime with:
-
-```bash
-sudo containerlab inspect -t lab/topology.clab.yml
-```
-
-## Step 4 — Configure the BGP neighbors
-
-(Neighbor config is not saved across a redeploy; bgpd is already enabled in the image.)
-
-```bash
-docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "neighbor 172.20.20.3 remote-as 65002" -c "end"
-docker exec clab-bgp-lab-router2 vtysh -c "conf t" -c "router bgp 65002" -c "neighbor 172.20.20.2 remote-as 65001" -c "end"
-```
-
-Confirm it's up (wait ~10s for `Established`):
-
-```bash
-ssh admin@172.20.20.2 'vtysh -c "show bgp summary"'   # password: admin
-```
-
-## Step 5 — Start the REST API (Terminal 1)
-
-```bash
-python3 -m pip install -r requirements.txt --break-system-packages   # first time only
-python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
-
-Leave this running. You should see `Application startup complete.`
-
-## Step 6 — Smoke-test the API (Terminal 2)
-
-```bash
-# open a second VM shell
-orb -m clab
-cd /Users/adyasinghal/HPE-CPP/bgp-ai-troubleshooter
-
-curl http://localhost:8000/health
-curl http://localhost:8000/rules/bgp_state_check
-curl -X POST http://localhost:8000/tools/bgp/state \
-  -H "Content-Type: application/json" \
-  -d '{"host": "172.20.20.2", "peer": "172.20.20.3"}'
-```
-
-Expect: `{"status":"ok"}`, the rules JSON, then `"success": true` with a populated `parsed.peers`.
-
-## Step 6.5 — Run Automated Unit & Reasoning Tests
-
-Run the offline automated test suite (does not require live routers or SSH):
+You can run the full automated test suite anytime without needing live routers or SSH connections:
 
 ```bash
 pytest -v
 ```
 
-This verifies:
-- TCP reachability parsing and normalization (no false substring matches)
-- Config baseline safety (missing baseline does not falsely report drift)
-- Interface diagnosis relevance based on peer IP subnet matching
-- Deterministic triage keyword classification for all starting points
-- Forward reasoning escalation chain (all 10 troubleshooting paths)
-- Enhanced Verdict presentation and evidence extraction
-- REST API endpoint contracts and error resilience
+This tests:
+- **`tests/test_tools.py`**: TCP reachability, BGP states, interface subnet detection, config baselines.
+- **`tests/test_triage.py`**: Deterministic keyword triage to intent mappings.
+- **`tests/test_analyzer.py`**: Escalation chains, loop prevention, and root cause determination.
+- **`tests/test_api.py`**: Tool Cohort REST API endpoints and error resilience.
+- **`tests/test_llm_engine.py`**: Evidence sanitization, Gemini API integration, JSON schema validation, and offline fallback.
 
-## Step 7 — Run the Analyze stage (healthy path)
+---
 
+## 3. Deploying the Live Containerlab Topology
 
+### Step 3.1 — Build the Router Image (FRR + SSH)
+*(Only needed once or when `lab/containerlab/Dockerfile` changes)*
 ```bash
-python3 -m analyzer.run "My BGP peer is stuck at active state" \
-  --host 172.20.20.2 --peer 172.20.20.3
+cd lab/containerlab
+docker build -t frr-ssh:8.5.2 .
+cd ../..
 ```
 
-With BGP up, it should check `bgp_state`, find `Established`, and report
-"no action needed."
-
-## Step 8 — Test the escalation (inject a fault)
-
-Break the session:
-
+### Step 3.2 — Deploy the Lab
 ```bash
-docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "neighbor 172.20.20.3 shutdown" -c "end"
+sudo containerlab deploy -t lab/containerlab/topology.clab.yml
 ```
 
-Run the analyzer again — now it walks the chain (`bgp_state → interface → tcp_port → config`) and reports a root cause:
-
+Inspect assigned management IPs anytime:
 ```bash
-python3 -m analyzer.run "My BGP peer is stuck at active state" \
-  --host 172.20.20.2 --peer 172.20.20.3
+sudo containerlab inspect -t lab/containerlab/topology.clab.yml
+```
+*(Commonly `router1` = `172.20.20.3` or `172.20.20.2`, `router2` = `172.20.20.2` or `172.20.20.3`)*.
+
+### Step 3.3 — Configure BGP Neighbors
+```bash
+docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "neighbor 172.20.20.2 remote-as 65002" -c "end"
+docker exec clab-bgp-lab-router2 vtysh -c "conf t" -c "router bgp 65002" -c "neighbor 172.20.20.3 remote-as 65001" -c "end"
 ```
 
-Undo the fault when done:
-
+Verify neighbor session (wait ~10 seconds for `Established`):
 ```bash
-docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "no neighbor 172.20.20.3 shutdown" -c "end"
+ssh admin@172.20.20.3 'vtysh -c "show bgp summary"'   # password: admin
 ```
 
 ---
 
-## Troubleshooting
+## 4. Running the Troubleshooter
 
-- **`ModuleNotFoundError: No module named 'tools'/'analyzer'`** — run from the
-  repo root, not from inside a sub-folder.
-- **`Address already in use`** — an old API is still running; stop it (Ctrl-C)
-  or use `--port 8001` (and update the curl/analyzer `--url`).
-- **`Unable to connect to port 22`** — the lab isn't deployed, or you're using
-  the wrong IP; re-check with `containerlab inspect`.
-- **`% Can't open configuration file /etc/frr/vtysh.conf`** — harmless warning,
-  ignore it.
+You will use two terminal sessions from the project root:
 
-## Notes
+### Terminal 1: Start the Tool Cohort REST API
+```bash
+uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+Leave this running. You should see `Application startup complete.`
 
-- Always run the API and the analyzer from inside the VM and from the repo root.
-- IPs can change per deploy — substitute what the deploy table shows.
-- The classic "interface down → BGP Active" demo needs peering over the `eth1`
-  data link (currently peering is over the management network).
+### Terminal 2: Run the Diagnostic Analyzer
+
+#### Scenario A: Deterministic Rule-Based Diagnosis
+```bash
+python -m analyzer.run "Why is my BGP session down?" --host 172.20.20.3 --peer 172.20.20.2
+```
+
+#### Scenario B: Deterministic + AI-Assisted Explanation Layer (`--llm`)
+```bash
+python -m analyzer.run "Why is my BGP session down?" --host 172.20.20.3 --peer 172.20.20.2 --llm
+```
+
+---
+
+## 5. Testing Fault Scenarios & Escalation
+
+### Fault 1: Administratively Shutdown Neighbor
+Simulate an operator error on `router1`:
+```bash
+docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "neighbor 172.20.20.2 shutdown" -c "end"
+```
+
+Run the troubleshooter:
+```bash
+python -m analyzer.run "Why is BGP down on router1?" --host 172.20.20.3 --peer 172.20.20.2 --llm
+```
+*Result*: The tool detects `Idle (Admin)` state, verifies transport is reachable, and the LLM produces a root-cause explanation and remediation steps (`no neighbor shutdown`).
+
+Recover from fault:
+```bash
+docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "no neighbor 172.20.20.2 shutdown" -c "end"
+```
+
+---
+
+## 6. Standalone Fallback / Offline AI Demonstration
+
+To test the LLM explanation engine and offline fallback directly:
+```bash
+python demo_llm_diagnosis.py
+```
+
+---
+
+## 7. Troubleshooting Common Issues
+
+| Issue | Cause | Solution |
+| :--- | :--- | :--- |
+| `ModuleNotFoundError: No module named 'tools'/'analyzer'` | Script executed from subfolder | Run commands from the repository root `bgp-ai-troubleshooter/`. |
+| `Address already in use (port 8000)` | API process already running | Stop existing process or use `--port 8001` and pass `--url http://localhost:8001` to `analyzer.run`. |
+| `Unable to connect to port 22` / `Connection refused` | Router not running or wrong IP | Run `sudo containerlab inspect -t lab/containerlab/topology.clab.yml` to check running container IPs. |
+| `LLM fallback: No API key provided` | `.env` missing or empty `LLM_API_KEY` | Add your Gemini key to `.env` or run without `--llm` for deterministic diagnosis. |
