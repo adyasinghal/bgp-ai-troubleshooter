@@ -21,20 +21,10 @@ class TCPPortTool(BaseTool):
             f'&& echo REACHABLE || echo UNREACHABLE'
         )
         result = self.device_client.run_raw(host, command)
-        parsed = self._parse(result.output, peer_ip=peer_ip, port=port)
-        return self._wrap(host, result, parsed)
-
-    def _parse(self, output: str, peer_ip: str, port: int = DEFAULT_BGP_PORT) -> dict:
-        tokens = [tok.strip().upper() for tok in output.split()]
-        if "UNREACHABLE" in tokens:
-            reachable = False
-        elif "REACHABLE" in tokens:
-            reachable = True
-        else:
-            reachable = False
-
-        return {
+        reachable = "REACHABLE" in result.output
+        parsed = {
             "peer_ip": peer_ip,
             "port": port,
             "reachable": reachable,
         }
+        return self._wrap(host, result, parsed)

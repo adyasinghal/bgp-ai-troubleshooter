@@ -12,11 +12,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Optional
 
-try:
-    import paramiko
-except ImportError:
-    paramiko = None
-
+import paramiko
 
 
 @dataclass
