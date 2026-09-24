@@ -55,8 +55,21 @@ Escalation chain (what to try next if a tool doesn't resolve the case):
 bgp_state_check --(if unresolved)--> interface_check
 interface_check --(if unresolved)--> tcp_port_check
 tcp_port_check  --(if unresolved)--> config_check
-config_check    --(if unresolved)--> end (hand back to human / LLM)
+config_check    --(if unresolved)--> ML engine
+ML engine       --(if confidence < 0.7 or "unknown")--> LLM (Claude)
+LLM             --(if unresolved)--> human, with the LLM's suggested next checks
 ```
+
+- **ML engine** (`analyzer/ml_engine.py`): a scikit-learn RandomForest that reads
+  all the collected evidence at once and names a fault class (remote-as mismatch,
+  neighbor shut down, neighbor missing, device unreachable, ...) with a
+  confidence. It also gives a second opinion next to every rule verdict.
+  Trained on synthetic cases for now; retrain with real labelled cases via
+  `python3 -m analyzer.ml_engine train --cases cases.jsonl`.
+- **LLM escalation** (`analyzer/llm_escalation.py`): sends the question, every
+  tool's parsed + raw output, and the ML guess to Claude, which returns a
+  structured root cause, fix, confidence and next checks. Needs
+  `ANTHROPIC_API_KEY`; without it the verdict says the step was skipped.
 
 ## Tools list
 
