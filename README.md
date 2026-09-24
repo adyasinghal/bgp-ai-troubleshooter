@@ -26,7 +26,8 @@ bgp-ai-troubleshooter/
 │   ├── triage.py                 (question → starting intent)  
 │   ├── rules_engine.py           (the reasoning loop)  
 │   ├── verdict.py                (builds root_cause/fix output)  
-│   └── ml_engine.py              (scikit-learn)  
+│   ├── ml_engine.py              (scikit-learn fault classifier)  
+│   └── llm_escalation.py         (hands unresolved cases to Claude)  
 ├── dashboard/                              # Flask or Streamlit UI code  
 │   └── \_\_init\_\_.py  
 ├── tests/  
