@@ -88,7 +88,25 @@ curl -X POST http://localhost:8000/tools/bgp/state \
 
 Expect: `{"status":"ok"}`, the rules JSON, then `"success": true` with a populated `parsed.peers`.
 
+## Step 6.5 — Run Automated Unit & Reasoning Tests
+
+Run the offline automated test suite (does not require live routers or SSH):
+
+```bash
+pytest -v
+```
+
+This verifies:
+- TCP reachability parsing and normalization (no false substring matches)
+- Config baseline safety (missing baseline does not falsely report drift)
+- Interface diagnosis relevance based on peer IP subnet matching
+- Deterministic triage keyword classification for all starting points
+- Forward reasoning escalation chain (all 10 troubleshooting paths)
+- Enhanced Verdict presentation and evidence extraction
+- REST API endpoint contracts and error resilience
+
 ## Step 7 — Run the Analyze stage (healthy path)
+
 
 ```bash
 python3 -m analyzer.run "My BGP peer is stuck at active state" \

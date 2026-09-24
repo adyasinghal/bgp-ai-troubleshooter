@@ -28,3 +28,7 @@ tools/config_baselines/
 # Containerlab generated lab state (keys, runtime data — never commit)
 lab/clab-*/
 *.clab.yml.bak
+
+# Local environment variables & secrets
+.env
+*.env
