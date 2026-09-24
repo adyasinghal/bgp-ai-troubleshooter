@@ -24,4 +24,9 @@ RUN set -eux; \
     (addgroup admin frr 2>/dev/null || usermod -aG frr admin); \
     (addgroup admin frrvty 2>/dev/null || usermod -aG frrvty admin); \
     # 5. Enable the BGP daemon so it is already running at boot
-    sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons
+    sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons; \
+    # 6. Give vtysh its own config file so it stops warning
+    #    "Can't open configuration file /etc/frr/vtysh.conf" on every command
+    echo "service integrated-vtysh-config" > /etc/frr/vtysh.conf; \
+    chown frr:frrvty /etc/frr/vtysh.conf; \
+    chmod 640 /etc/frr/vtysh.conf

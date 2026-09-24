@@ -9,11 +9,13 @@ topology:
     router1:
       kind: linux
       image: frr-ssh:8.5.2
+      mgmt-ipv4: 172.20.20.2   # pinned: otherwise IPs follow container start order
       exec:
         - /usr/sbin/sshd
     router2:
       kind: linux
       image: frr-ssh:8.5.2
+      mgmt-ipv4: 172.20.20.3
       exec:
         - /usr/sbin/sshd
   links:
