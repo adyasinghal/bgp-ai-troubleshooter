@@ -31,3 +31,7 @@ analyzer/models/
 # Containerlab generated lab state (keys, runtime data — never commit)
 clab-*/
 *.clab.yml.bak
+
+# Runtime alert history and its inter-process lock
+alerts_log.json
+alerts_log.json.lock

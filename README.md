@@ -39,4 +39,15 @@ bgp-ai-troubleshooter/
 └── setup.py                                # Package installation setup  
 ```
 
+## Alert monitoring
 
+The `alerts/` component polls BGP, interface, TCP/179, and configuration
+telemetry, persists deduplicated incident/recovery events, and displays them
+in an optional Streamlit dashboard. Terminal verdicts produced by
+`analyzer.rules_engine.diagnose` are published into the same event history.
+Recovered incidents leave the dashboard's active list and remain in resolved
+history. Dashboard timestamps are shown in Indian Standard Time.
+
+See [alerts/README.md](alerts/README.md) for installation, operation, and
+integration details, and [makechanges.md](makechanges.md) for the branch
+change summary.
