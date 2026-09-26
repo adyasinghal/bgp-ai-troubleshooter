@@ -9,6 +9,13 @@ from analyzer.verdict import Verdict
 ML_CONFIDENCE_THRESHOLD = 0.7   # below this, the ML guess goes to the LLM as a hint
 
 
+def _publish(verdict: Verdict, host: str, peer: str) -> Verdict:
+    from alerts.integration import publish_verdict
+
+    publish_verdict(verdict, host, peer)
+    return verdict
+
+
 def _payload(tool_id: str, ctx: dict) -> dict:
     host, peer = ctx["host"], ctx.get("peer")
     if tool_id == "bgp_state":
@@ -85,30 +92,34 @@ def diagnose(client, question: str, host: str, peer: str,
                                   source="rules")
                 if use_ml:   # second opinion, shown alongside the rule's answer
                     verdict.ml_prediction = ml_engine.predict(evidence, peer).to_dict()
-                return verdict
+                return _publish(verdict, host, peer)
         intent = rule.get("next_intent_on_fail")   # escalate
 
     # Rule chain exhausted -> ML engine
     ml = ml_engine.predict(evidence, peer) if use_ml else None
     if ml and ml.label != "unknown" and ml.confidence >= ML_CONFIDENCE_THRESHOLD:
         cause, fix = ml.describe(peer)
-        return Verdict(True, cause, fix, checked, evidence, source="ml",
-                       confidence=f"{ml.confidence:.2f}", ml_prediction=ml.to_dict())
+        verdict = Verdict(True, cause, fix, checked, evidence, source="ml",
+                          confidence=f"{ml.confidence:.2f}", ml_prediction=ml.to_dict())
+        return _publish(verdict, host, peer)
 
     # ML unsure -> LLM
     verdict = Verdict(False, "No root cause found by the rule chain.",
                       "Escalate to a human.", checked, evidence,
                       ml_prediction=ml.to_dict() if ml else None)
     if not use_llm:
-        return verdict
+        return _publish(verdict, host, peer)
     try:
         llm = llm_escalation.escalate(question, host, peer, checked, evidence,
                                       verdict.ml_prediction)
     except llm_escalation.LLMUnavailable as e:
         verdict.notes.append(f"LLM escalation skipped: {e}")
-        return verdict
+        return _publish(verdict, host, peer)
 
-    return Verdict(llm["resolved"], llm["root_cause"], llm["suggested_fix"], checked, evidence,
-                   source="llm", confidence=llm["confidence"],
-                   ml_prediction=verdict.ml_prediction, next_checks=llm["next_checks"],
-                   notes=[f"Diagnosed by {llm['model']}"])
+    final_verdict = Verdict(
+        llm["resolved"], llm["root_cause"], llm["suggested_fix"], checked, evidence,
+        source="llm", confidence=llm["confidence"],
+        ml_prediction=verdict.ml_prediction, next_checks=llm["next_checks"],
+        notes=[f"Diagnosed by {llm['model']}"],
+    )
+    return _publish(final_verdict, host, peer)
