@@ -1,56 +1,49 @@
-# Required changes for full alert integration
+# Alert integration changes
 
-## Verified alert-package status
+## Implemented on the `alert` branch
 
-The remote `alert` branch contains the `alerts/` package, alert tests, and the
-integration handoff. Its files match the local component copy. The package
-imports the existing tool-result model and converts the analyzer's existing
-verdict shape. The isolated alert tests and synthetic monitor demo verify the
-alert behavior without requiring a live router.
+- Terminal rule, ML, LLM, and unresolved analyzer verdicts now pass through
+  `alerts.integration.publish_verdict`. This persists fault events and turns
+  a subsequent rules verdict with confirmed `Established` BGP evidence into
+  a recovery event.
+- Monitor and analyzer transitions now use the same lock-protected durable
+  state operation. It reloads the most recent device/peer event while holding
+  the history lock, so separate processes suppress duplicates and agree on
+  whether a recovery is needed.
+- The Streamlit dashboard displays current unresolved incidents separately
+  from resolved-event history. A recovered incident no longer appears in the
+  active incident list.
+- Dashboard event timestamps are formatted in Indian Standard Time.
+- FRR 8.5.2 interface polling now uses its supported `show interface`
+  command.
+- TCP reachability now matches the exact `REACHABLE` result, rather than
+  mistakenly treating `UNREACHABLE` as reachable.
+- Tests cover analyzer publication, recovery, durable duplicate suppression,
+  event-list separation, IST formatting, TCP parsing, and FRR interface
+  command compatibility.
 
-## Changes needed outside `alerts/`
+## Compatibility notes
 
-These changes are required to have analyzer results show up in the alert
-history and dashboard. They are intentionally not made here because they
-modify application-owned integration surfaces:
+- No changes to existing `main`-branch API files are required for the alert
+  lifecycle; the analyzer wiring is included in this branch.
+- The existing API tool and rules endpoint payloads remain unchanged.
+- Analyzer `Verdict` structure and CLI output contract remain unchanged.
+- The standalone alert dashboard continues to read the repository-root
+  `alerts_log.json`; no additional API route is required for it.
+- Install the optional dashboard dependency with
+  `python -m pip install -r alerts/requirements.txt`.
 
-1. **`analyzer/rules_engine.py` — required:** Send each terminal `Verdict`
-   through `verdict_to_alert`. Use a process-wide `AlertStateTracker`, restore
-   it once at startup, deduplicate fault events, and persist emitted alerts
-   with `append_alert`. When a rules verdict confirms `Established`, call
-   `record_healthy` so an earlier incident produces a recovery event. Apply the
-   same event path to accepted ML, LLM, and unresolved verdicts.
-2. **`api/main.py` — optional:** Add an alert-history endpoint only if API
-   clients need to read events over HTTP. The standalone dashboard reads the
-   shared history file directly. Keep existing tool and rules response shapes
-   unchanged.
-3. **`.gitignore` — recommended:** Ignore `alerts_log.json` and
-   `alerts_log.json.lock` to avoid committing local runtime state.
-4. **Root `requirements.txt` — optional:** Add Streamlit only if the main
-   application wants to install the standalone alert dashboard by default.
-   Otherwise use `alerts/requirements.txt`.
-5. **Integration tests — required with the wiring:** Cover a detected fault,
-   healthy Established recovery, duplicate suppression, telemetry failure,
-   and any HTTP alert-history endpoint that is introduced.
+## Verification
 
-## Scope limitation
+Run the full suite from the repository root:
 
-The alert package can be run as a standalone polling monitor and dashboard,
-but until item 1 is implemented, calling the existing analyzer does not
-automatically publish analyzer verdicts into the alert history. That is the
-remaining end-to-end integration gap; it is not a mismatch in the
-`ToolResult` or `Verdict` data structures.
+```powershell
+python -m pytest -q
+```
 
-## Test-run finding
+The copied isolated package can also run its component tests with:
 
-The first Windows demo run exposed Unicode arrows in state-tracker log messages
-that could not be encoded by the default Windows console code page. The
-log-only arrows have been replaced with ASCII `->` in
-`alerts/state_tracker.py`, so incident changes and recovery are logged without
-`UnicodeEncodeError`. Alert state behavior is unchanged.
-
-The copied existing `tools/bgp_state.py` also emits a Python
-`SyntaxWarning` from a regex inside its commented-out historical parser. It
-does not prevent compilation, imports, tests, or the demo. It is outside the
-alert package and can be cleaned up separately if maintainers want to remove
-that dead commented block.
+```powershell
+Set-Location test
+python -m pytest -q tests/alerts
+```
