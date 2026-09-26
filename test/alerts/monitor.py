@@ -19,7 +19,7 @@ from alerts.state_tracker import AlertStateTracker
 from alerts.store import (
     ALERTS_LOG_PATH,
     AlertStoreError,
-    append_alert,
+    record_transition,
     restore_tracker,
 )
 
@@ -52,7 +52,6 @@ class NetworkMonitor:
             raise
 
     def record_alert(self, alert: Alert) -> None:
-        append_alert(alert, log_path=self.log_path)
         logger.info(
             "Emitted Alert: [%s] %s on %s",
             alert.severity.value,
@@ -74,11 +73,15 @@ class NetworkMonitor:
         alert = self.evaluator.evaluate(tool_results, host, target_peer)
 
         if alert is None:
-            recovery = self.tracker.record_healthy(host, target_peer)
+            recovery = record_transition(
+                self.tracker, host, target_peer, None, log_path=self.log_path
+            )
             if recovery:
                 self.record_alert(recovery)
         else:
-            final_alert = self.tracker.check_and_update(alert)
+            final_alert = record_transition(
+                self.tracker, host, target_peer, alert, log_path=self.log_path
+            )
             if final_alert:
                 self.record_alert(final_alert)
             else:

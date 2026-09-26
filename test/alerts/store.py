@@ -66,37 +66,103 @@ def append_alert(alert: Alert, log_path: Path = ALERTS_LOG_PATH) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with _file_lock(log_path):
         history = load_alerts(log_path)
-        record = alert.to_dict()
-        record["plain_english"] = format_plain_english(alert)
-        history.append(record)
+        _append_alert_locked(alert, history, log_path)
 
-        temporary_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=log_path.parent,
-                prefix=log_path.name + ".",
-                suffix=".tmp",
-                delete=False,
-            ) as temporary_file:
-                temporary_path = Path(temporary_file.name)
-                json.dump(history, temporary_file, indent=2)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
-            os.replace(temporary_path, log_path)
-        except OSError as error:
-            if temporary_path is not None:
-                try:
-                    temporary_path.unlink()
-                except FileNotFoundError:
-                    pass
-            raise AlertStoreError(f"Could not save alert history at {log_path}: {error}") from error
+
+def _append_alert_locked(alert: Alert, history: list[dict], log_path: Path) -> None:
+    record = alert.to_dict()
+    record["plain_english"] = format_plain_english(alert)
+    history.append(record)
+
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=log_path.parent,
+            prefix=log_path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(history, temporary_file, indent=2)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, log_path)
+    except OSError as error:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise AlertStoreError(f"Could not save alert history at {log_path}: {error}") from error
+
+
+def record_transition(
+    tracker: AlertStateTracker,
+    device: str,
+    neighbor: str,
+    alert: Alert | None,
+    log_path: Path = ALERTS_LOG_PATH,
+) -> Alert | None:
+    """Apply and persist one alert or healthy transition under the history lock."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(log_path):
+        history = load_alerts(log_path)
+        latest = next(
+            (
+                record
+                for record in reversed(history)
+                if record.get("device") == device and record.get("neighbor") == neighbor
+            ),
+            None,
+        )
+
+        tracker.reset(device, neighbor)
+        if latest is not None:
+            restored = _alert_from_record(latest)
+            if restored is not None:
+                tracker.restore(restored)
+
+        emitted = (
+            tracker.record_healthy(device, neighbor)
+            if alert is None
+            else tracker.check_and_update(alert)
+        )
+        if emitted is not None:
+            _append_alert_locked(emitted, history, log_path)
+        return emitted
+
+
+def _alert_from_record(record: dict) -> Alert | None:
+    try:
+        device = record["device"]
+        neighbor = record["neighbor"]
+        if not isinstance(device, str) or not isinstance(neighbor, str):
+            raise ValueError("device and neighbor must be strings")
+        return Alert(
+            alert_id=record.get("alert_id", ""),
+            timestamp=record.get("timestamp", ""),
+            device=device,
+            neighbor=neighbor,
+            alert_type=AlertType(record.get("alert_type", AlertType.BGP_STATE.value)),
+            severity=AlertSeverity(record.get("severity", AlertSeverity.WARNING.value)),
+            previous_state=record.get("previous_state"),
+            current_state=record.get("current_state"),
+            message=record.get("message", ""),
+            cause=record.get("cause", ""),
+            recommended_action=record.get("recommended_action", ""),
+            evidence=record.get("evidence") or {},
+        )
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Skipping invalid alert history record: %r", record)
+        return None
 
 
 def restore_tracker(
     tracker: AlertStateTracker, log_path: Path = ALERTS_LOG_PATH
 ) -> None:
+    tracker.reset_all()
     latest: dict[tuple[str, str], dict] = {}
     for record in load_alerts(log_path):
         device = record.get("device")
@@ -105,22 +171,6 @@ def restore_tracker(
             latest[(device, neighbor)] = record
 
     for record in latest.values():
-        try:
-            tracker.restore(
-                Alert(
-                    alert_id=record.get("alert_id", ""),
-                    timestamp=record.get("timestamp", ""),
-                    device=record["device"],
-                    neighbor=record["neighbor"],
-                    alert_type=AlertType(record.get("alert_type", AlertType.BGP_STATE.value)),
-                    severity=AlertSeverity(record.get("severity", AlertSeverity.WARNING.value)),
-                    previous_state=record.get("previous_state"),
-                    current_state=record.get("current_state"),
-                    message=record.get("message", ""),
-                    cause=record.get("cause", ""),
-                    recommended_action=record.get("recommended_action", ""),
-                    evidence=record.get("evidence") or {},
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            logger.warning("Skipping invalid alert history record: %r", record)
+        alert = _alert_from_record(record)
+        if alert is not None:
+            tracker.restore(alert)
