@@ -50,7 +50,7 @@ class AlertStateTracker:
             return None
 
         logger.info(
-            "StateTracker: state changed for %s: %s → %s — emitting alert.",
+            "StateTracker: state changed for %s: %s -> %s; emitting alert.",
             key,
             last.current_state,
             new_alert.current_state,
@@ -86,7 +86,7 @@ class AlertStateTracker:
             return None
 
         logger.info(
-            "StateTracker: recovery for %s: %s → Established — emitting RECOVERY.",
+            "StateTracker: recovery for %s: %s -> Established; emitting RECOVERY.",
             key,
             last.current_state,
         )
