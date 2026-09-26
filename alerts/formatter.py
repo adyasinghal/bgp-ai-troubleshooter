@@ -61,7 +61,7 @@ def format_plain_english(alert: Alert) -> str:
         iface_str = ", ".join(down_ifaces) if down_ifaces else "an interface"
         return (
             f"Your interface state is down (interface: {iface_str}). "
-            f"That is why your BGP state is stuck at {alert.current_state}. "
+            f"That is why your BGP state is stuck at {alert.current_state or 'unknown'}. "
             f"Please bring the interface up to resolve the issue."
         )
 
@@ -69,7 +69,7 @@ def format_plain_english(alert: Alert) -> str:
         port = alert.evidence.get("tcp_port", 179)
         return (
             f"Your BGP peer {alert.neighbor} is not reachable on TCP port {port}. "
-            f"That is why your BGP session is stuck at {alert.current_state}. "
+            f"That is why your BGP session is stuck at {alert.current_state or 'unknown'}. "
             f"Please check your firewall or routing rules to allow TCP port {port} to the peer."
         )
 

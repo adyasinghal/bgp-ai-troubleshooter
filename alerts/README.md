@@ -12,8 +12,10 @@ integrated without changing their existing contracts.
 | `models.py` | Alert fields, severity, and event types |
 | `evaluator.py` | Converts router `ToolResult` telemetry into evidence-backed alerts |
 | `bridge.py` | Converts the analyzer's `Verdict` object or dictionary into an alert |
+| `integration.py` | Publishes terminal analyzer verdicts through the shared lifecycle |
 | `state_tracker.py` | Suppresses duplicate incidents and emits recovery transitions |
-| `store.py` | Validates and atomically persists JSON history; restores tracker state |
+| `store.py` | Validates history and atomically coordinates transitions across processes |
+| `presentation.py` | Separates active incidents from recovery history and formats IST timestamps |
 | `formatter.py` | Produces plain-language and terminal alert formats |
 | `monitor.py` | Polls BGP, interface, TCP, and configuration tools and records events |
 | `dashboard.py` | Displays event history and refreshes automatically every five seconds |
@@ -39,12 +41,15 @@ as healthy when it came from the rules source and includes BGP evidence showing
 the queried peer is `Established`. This avoids dropping a resolved diagnosis
 that actually describes a fault.
 
-The GitHub `main` API currently does not invoke the alert package, expose alert
-routes, or install Streamlit. The alert files therefore do not change
-application-owned API files or root dependencies. To display analyzer events
-through that API, the application owner must explicitly wire the calls
-described under [API integration](#api-integration). This integration change
-is not included here.
+Every terminal result from `analyzer.rules_engine.diagnose` is now published
+through `alerts.integration.publish_verdict`. This includes rule, ML, LLM, and
+unresolved results. A rules verdict is treated as healthy only when its BGP
+evidence confirms `Established`; this closes a previously active alert with a
+recovery event. The analyzer's existing `Verdict` response shape is unchanged.
+
+The API tool and rules endpoints keep their existing contracts. An additional
+alert-history HTTP endpoint is unnecessary for the standalone dashboard,
+which reads the shared history file directly.
 
 ## Installation
 
@@ -80,59 +85,39 @@ python -m streamlit run alerts/dashboard.py
 ```
 
 The monitor and dashboard share `alerts_log.json` at the repository root.
-Events are append-only; repeat incidents with unchanged state are suppressed
-by the monitor, and a subsequent healthy poll records a `RECOVERY` event. The
-dashboard derives active incident counts from the latest event for each
-device/peer pair. A corrupt history file is reported as an error rather than
-silently overwritten.
+Events are append-only. The monitor and analyzer both use the durable
+transition operation, which locks the history file, reloads the latest
+device/peer state, suppresses duplicate incidents, and emits a `RECOVERY`
+event when healthy evidence follows a fault. This keeps separate monitor and
+analyzer processes coordinated. A corrupt history file is reported as an
+error rather than silently overwritten.
+
+The dashboard lists only the latest unresolved incident for each device/peer
+under **Active incidents**. Recovery events appear separately under
+**Resolved incident history**; an incident that has recovered is no longer
+shown as active. Event times are converted from stored UTC timestamps to
+Indian Standard Time (IST).
 
 For a different history location, pass a `Path` to `NetworkMonitor` or to the
 store functions. Keep the monitor and dashboard configured to use the same
 file.
-
-## API integration
-
-The following is an integration outline, not a change made to the existing API.
-Create one evaluator and state tracker for the application process, restore
-their last state at startup, and use the same instances for analyzer and
-telemetry events:
-
-```python
-from alerts.bridge import verdict_to_alert
-from alerts.evaluator import AlertEvaluator
-from alerts.state_tracker import AlertStateTracker
-from alerts.store import append_alert, restore_tracker
-
-alert_evaluator = AlertEvaluator()
-alert_tracker = AlertStateTracker()
-restore_tracker(alert_tracker)
-```
-
-For direct tool checks, convert the API's tool result payloads into the
-existing `ToolResult` model and pass them to `evaluate`. Send a returned alert
-through `check_and_update`; when evaluation returns `None`, call
-`record_healthy(device, peer)` and persist any resulting recovery. Persist each
-non-`None` event with `append_alert`.
-
-For analyzer results, call `verdict_to_alert(verdict, device, peer)`. Persist
-fault alerts through `check_and_update`. When it returns `None` for a healthy
-verdict, call `record_healthy` and persist any recovery event. This preserves
-deduplication and recovery behavior across both event sources.
-
-The tracker is in-memory and should be shared by the event handlers in a
-single API process. The JSON store protects file writes across processes, but
-it does not coordinate separate in-memory trackers; multi-worker deployments
-should use a shared state store or otherwise coordinate alert ownership.
 
 ## Event and error behavior
 
 - BGP state, interface-down, TCP/179 reachability, and configuration drift
   checks can produce alerts. Drift is only considered meaningful when a
   baseline is present.
+- TCP probes validate the peer as IPv4 and the port as 1–65535 before
+  constructing the remote shell command.
 - Failed tool calls produce explicit telemetry-failure alerts; their failed
   parsed values are excluded from evaluation.
 - An unchanged active incident is not emitted repeatedly. A healthy result
-  after an incident emits a `RECOVERY` event, displayed as `RESOLVED`.
+  after an incident emits one `RECOVERY` event and removes it from the active
+  incident list.
+- Recovery history is shown in its own section, not as an active alert.
+- Alert timestamps are displayed in Indian Standard Time.
+- Durable transition handling coordinates tracker state between monitor and
+  analyzer processes using the alert-history file lock.
 - The dashboard refreshes automatically and has no polling-delay selector,
   manual cycling, or blocking sleep loop.
 - Store read/write failures are raised and shown to the dashboard or monitor;

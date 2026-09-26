@@ -38,8 +38,12 @@ class AlertStateTracker:
 
         if (
             last.severity == new_alert.severity
-            and last.current_state == new_alert.current_state
             and last.alert_type == new_alert.alert_type
+            and (
+                last.current_state == new_alert.current_state
+                or last.current_state is None
+                or new_alert.current_state is None
+            )
         ):
             logger.debug(
                 "StateTracker: state unchanged for %s (%s %s) — suppressing.",
@@ -47,6 +51,8 @@ class AlertStateTracker:
                 new_alert.severity.value,
                 new_alert.current_state,
             )
+            if last.current_state is None and new_alert.current_state is not None:
+                self._state[key] = new_alert
             return None
 
         logger.info(
@@ -85,10 +91,11 @@ class AlertStateTracker:
         if last.severity == AlertSeverity.RECOVERY:
             return None
 
+        previous_state = last.current_state or "unknown"
         logger.info(
             "StateTracker: recovery for %s: %s -> Established; emitting RECOVERY.",
             key,
-            last.current_state,
+            previous_state,
         )
         recovery = Alert(
             device=device,
@@ -102,7 +109,7 @@ class AlertStateTracker:
             ),
             cause=(
                 f"The condition that caused the previous {last.severity.value} alert "
-                f"({last.alert_type.value}: {last.current_state}) has been resolved."
+                f"({last.alert_type.value}: {previous_state}) has been resolved."
             ),
             recommended_action=(
                 "Verify that the BGP session remains stable by monitoring 'show bgp summary' "
