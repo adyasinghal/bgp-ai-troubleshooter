@@ -18,7 +18,7 @@ class InterfaceTool(BaseTool):
     tool_id = "interface"
 
     def run(self, host: str, interface: str | None = None) -> ToolResult:
-        command = f"show interface {interface}" if interface else "show interface detail"
+        command = f"show interface {interface}" if interface else "show interface"
         result = self.device_client.run_vtysh(host, command)
         parsed = self._parse(result.output)
         return self._wrap(host, result, parsed)
