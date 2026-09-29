@@ -87,7 +87,7 @@ LLM             --(if unresolved)--> human, with the LLM's suggested next checks
 
 ```
 tool1 (BGP state)  -> runs "show bgp summary"    -> sends each peer's session state
-tool2 (Interface)  -> runs "show interface detail" -> sends link/admin state per interface
+tool2 (Interface)  -> runs "show interface"      -> sends link/admin state per interface
 tool3 (TCP / port) -> checks TCP port 179 to peer  -> sends transport reachability (up/down)
 tool4 (Config)     -> runs "show running-config"   -> diffs vs baseline, sends drift status
 ```

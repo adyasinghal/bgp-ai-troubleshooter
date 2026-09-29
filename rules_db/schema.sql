@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_rules_intent ON rules(intent);
 -- Seed: tools list (matches the Tool cohort in the architecture diagram)
 INSERT OR REPLACE INTO tools (tool_id, display_name, description, endpoint, base_command) VALUES
     ('bgp_state',  'BGP state',  'Fetch current BGP session state',        '/tools/bgp/state',     'show bgp summary'),
-    ('interface',  'Interface',  'Fetch interface detail / link state',    '/tools/interface/detail','show interface detail'),
+    ('interface',  'Interface',  'Fetch interface detail / link state',    '/tools/interface/detail','show interface'),
     ('tcp_port',   'TCP / port', 'Check TCP reachability on BGP port 179', '/tools/tcp/check',     'check port 179'),
     ('config',     'Config',     'Diff running config against baseline',   '/tools/config/diff',   'show run diff');
 
