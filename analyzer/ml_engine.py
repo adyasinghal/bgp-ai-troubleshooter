@@ -16,6 +16,7 @@ where each line is {"evidence": [...], "peer": "172.20.20.3", "label": "remote_a
 """
 import argparse
 import json
+import logging
 import random
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -26,6 +27,8 @@ from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 
 MODEL_PATH = Path(__file__).parent / "models" / "bgp_fault_model.joblib"
+
+log = logging.getLogger(__name__)
 
 PEER_STATES = ["Established", "Active", "Connect", "Idle", "OpenSent", "OpenConfirm"]
 
@@ -288,6 +291,7 @@ def train(cases_path: Path | None = None, verbose: bool = False) -> RandomForest
     model = RandomForestClassifier(n_estimators=200, random_state=42).fit(X, y)
     MODEL_PATH.parent.mkdir(exist_ok=True)
     joblib.dump(model, MODEL_PATH)
+    log.info("Trained ML model on %d cases; saved to %s", len(y), MODEL_PATH)
     return model
 
 
@@ -299,21 +303,27 @@ def _load_model() -> RandomForestClassifier:
     if _model is None:
         try:
             _model = joblib.load(MODEL_PATH)
-        except Exception:   # missing, or saved by an incompatible sklearn version
+            log.info("Loaded ML model from %s", MODEL_PATH)
+        except Exception as e:   # missing, or saved by an incompatible sklearn version
+            log.info("No usable ML model at %s (%s); training a new one", MODEL_PATH, e)
             _model = train()
     return _model
 
 
 def predict(evidence: list[dict], peer: str | None = None) -> MLPrediction:
     model = _load_model()
-    probs = model.predict_proba([_vector(extract_features(evidence, peer))])[0]
+    features = extract_features(evidence, peer)
+    log.debug("ML features (non-zero): %s", {k: v for k, v in features.items() if v})
+    probs = model.predict_proba([_vector(features)])[0]
     ranked = sorted(zip(model.classes_, probs), key=lambda p: p[1], reverse=True)
     label, confidence = ranked[0]
-    return MLPrediction(
+    prediction = MLPrediction(
         label=str(label),
         confidence=round(float(confidence), 3),
         probabilities={str(l): round(float(p), 3) for l, p in ranked if p > 0},
     )
+    log.debug("ML probabilities: %s", prediction.probabilities)
+    return prediction
 
 
 if __name__ == "__main__":

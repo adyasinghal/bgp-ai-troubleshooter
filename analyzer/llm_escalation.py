@@ -8,11 +8,14 @@ Needs Anthropic credentials: set ANTHROPIC_API_KEY (or run `ant auth login`).
 Override the model with the BGP_LLM_MODEL environment variable.
 """
 import json
+import logging
 import os
 
 import anthropic
 
 MODEL = os.environ.get("BGP_LLM_MODEL", "claude-opus-5")
+
+log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a senior network engineer troubleshooting BGP sessions on FRRouting (FRR) routers running in a Containerlab lab.
 
@@ -51,6 +54,7 @@ def escalate(question: str, host: str, peer: str | None, checked: list[str],
         "ml_prediction": ml_prediction,
         "evidence": evidence,
     }
+    log.info("Escalating to LLM (model %s)", MODEL)
     try:
         client = anthropic.Anthropic()
         response = client.beta.messages.create(
@@ -79,10 +83,14 @@ def escalate(question: str, host: str, peer: str | None, checked: list[str],
             raise
         raise LLMUnavailable("no Anthropic credentials (set ANTHROPIC_API_KEY)") from e
 
+    log.info("LLM response: model=%s stop_reason=%s input_tokens=%s output_tokens=%s",
+             response.model, response.stop_reason,
+             response.usage.input_tokens, response.usage.output_tokens)
     if response.stop_reason == "refusal":
         raise LLMUnavailable("the model declined to answer")
     if response.stop_reason == "max_tokens":
         raise LLMUnavailable("the model's answer was cut off")
 
     text = next(b.text for b in response.content if b.type == "text")
+    log.debug("LLM diagnosis: %s", text)
     return {**json.loads(text), "model": response.model}

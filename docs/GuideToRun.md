@@ -138,6 +138,14 @@ ML opinion:    healthy (1.00)
 `ML opinion` is the ML engine's second opinion; it's shown whenever the rules
 made the decision.
 
+Every run also writes a log file to `logs/run_<date>-<time>.log` (the path is
+printed as the last line, `Log file:`). It records each step in order: the
+starting intent, each rule fetched, every tool call with its payload, result
+and raw output, each rule decision and escalation, the ML prediction with its
+probabilities, the LLM call and its token usage, and the final verdict. If a
+run crashes, the traceback is in the log too. Use `--log-dir <dir>` to write
+logs somewhere else.
+
 The first run trains the ML model (about a second) and saves it to
 `analyzer/models/`. Later runs reuse it.
 
