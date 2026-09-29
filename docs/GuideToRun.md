@@ -6,18 +6,17 @@ lab → REST tools → Analyze stage.
 The Analyze stage escalates in this order, stopping as soon as one step finds a root cause:
 
 ```
-rule chain → ML engine (scikit-learn) → LLM (Claude) → human
+rule chain → ML engine (scikit-learn) → LLM (local model via Ollama) → human
 ```
 
-Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM.
+Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM. The one exception is Ollama, which runs on the Mac (see Step 7).
 
 ## Prerequisites (one-time)
 
 - OrbStack installed, with an Ubuntu VM named `clab` (see `InitialSetup.md`).
 - Docker + Containerlab installed inside that VM.
 - Python 3 + pip inside the VM.
-- *(Optional)* An Anthropic API key, for the LLM escalation step. Without it
-  everything else still works and the verdict says the LLM step was skipped.
+- *(Optional)* Ollama on the Mac, for the LLM escalation step (free, runs locally; Step 7). Without it everything else still works and the verdict says the LLM step was skipped.
 
 ## Layout
 
@@ -42,9 +41,7 @@ docker build -t frr-ssh:8.5.2 .
 cd ../..
 ```
 
-If the lab is already running, a rebuild doesn't reach the existing containers,
-and `deploy` just reports `no changes`. Destroy the lab first so Step 3
-recreates the containers from the new image:
+If the lab is already running, a rebuild doesn't reach the existing containers, and `deploy` just reports `no changes`. Destroy the lab first so Step 3 recreates the containers from the new image:
 
 ```bash
 sudo containerlab destroy -t lab/containerlab/topology.clab.yml
@@ -56,8 +53,7 @@ sudo containerlab destroy -t lab/containerlab/topology.clab.yml
 sudo containerlab deploy -t lab/containerlab/topology.clab.yml
 ```
 
-The topology pins the management IPs (`mgmt-ipv4`), so every deploy gives
-**router1 = 172.20.20.2** and **router2 = 172.20.20.3**, the addresses this guide uses.
+The topology pins the management IPs (`mgmt-ipv4`), so every deploy gives **router1 = 172.20.20.2** and **router2 = 172.20.20.3**, the addresses this guide uses.  
 Check them anytime with:
 
 ```bash
@@ -106,15 +102,37 @@ curl -X POST http://localhost:8000/tools/bgp/state \
 
 Expect: `{"status":"ok"}`, the rules JSON, then `"success": true` with a populated `parsed.peers`.
 
-## Step 7 — (Optional) Enable LLM escalation (Terminal 2)
+## Step 7 — (Optional) Enable LLM escalation with Ollama
+
+The LLM step uses a free local model served by Ollama. Ollama runs **on the Mac, not in the VM**, so it can use the Apple GPU. The analyzer in the VM reaches it at `http://host.orb.internal:11434`, which OrbStack forwards to the Mac's localhost.
+
+**7a. On the Mac (a normal macOS terminal, not `orb -m clab`), once:**
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...        # your key; add to ~/.bashrc to keep it
-export BGP_LLM_MODEL=claude-opus-5         # optional; this is the default
+brew install ollama
+brew services start ollama          # runs the Ollama server now and at login
+ollama pull qwen2.5:7b              # ~4.7 GB download; the default model
+ollama run qwen2.5:7b "say hi"      # quick check; the first load takes a few seconds
 ```
 
-Claude is only called when both the rules and the ML engine are stuck, and each
-call is billed to that key. Add `--no-llm` to any analyzer run to skip it.
+(Or install the Ollama app from ollama.com and open it instead of `brew services start`.)
+
+**7b. In the VM (Terminal 2), check the VM can reach it:**
+
+```bash
+curl http://host.orb.internal:11434/api/tags   # should list qwen2.5:7b
+```
+
+**7c. (Optional) Settings.** The defaults work as-is; set these only to change them:
+
+```bash
+export BGP_LLM_MODEL=qwen2.5:7b                      # any model you've pulled
+export BGP_LLM_URL=http://host.orb.internal:11434    # where Ollama is
+export BGP_LLM_NUM_CTX=16384                         # context window (tokens)
+export BGP_LLM_TIMEOUT=300                           # seconds to wait for an answer
+```
+
+The LLM is only called when both the rules and the ML engine are stuck. It's free, and nothing leaves your machine. Add `--no-llm` to any analyzer run to skip it. 
 
 ## Step 8 — Run the Analyze stage (healthy path)
 
@@ -205,12 +223,14 @@ python3 -m analyzer.run "My BGP peer won't come up" \
 ```
 
 When the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
-case goes to Claude. Expect `Decided by: llm` with Claude's root cause and fix,
-plus a `Next checks:` list of commands to confirm it. Without an API key you'll
-see `Note: LLM escalation skipped: no Anthropic credentials` instead.
+case goes to the LLM. Expect `Decided by: llm` with its root cause and fix,
+plus a `Next checks:` list of commands to confirm it, and a
+`Diagnosed by qwen2.5:7b` note. If Ollama isn't running you'll see
+`Note: LLM escalation skipped: could not reach Ollama ...` instead.
 
 The exact result depends on the BGP state at that moment. If the ML engine is
-confident, it decides and Claude isn't called.
+confident, it decides and the LLM isn't called. A small local model is less
+reliable than Claude, so always check its answer against `Next checks`.
 
 Undo the fault:
 
@@ -221,8 +241,7 @@ docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "nei
 <!-- Future Work -->
 ## Step 11 — (Optional) Save a baseline so config drift is caught by rules
 
-The config rule only fires when a known-good baseline exists. With BGP healthy,
-save one per router:
+The config rule only fires when a known-good baseline exists. With BGP healthy, save one per router:
 
 ```bash
 python3 -c "
@@ -239,8 +258,7 @@ more specifically as `remote_as_mismatch`.
 
 ## Step 12 — (Optional) Retrain the ML model
 
-The model starts out trained on synthetic cases. To retrain, and to add real
-labelled cases (one JSON object per line:
+The model starts out trained on synthetic cases. To retrain, and to add real labelled cases (one JSON object per line:
 `{"evidence": [...], "peer": "172.20.20.3", "label": "remote_as_mismatch"}`):
 
 ```bash
@@ -254,8 +272,6 @@ It prints per-class precision/recall on a held-out split, then saves the model.
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'tools'/'analyzer'`** — run from the
-  repo root, not from inside a sub-folder.
 - **`Address already in use`** — an old API is still running, often in another
   terminal tab. Stop it with Ctrl-C in that tab, or from anywhere with
   `pkill -f "uvicorn api.main:app"` (`ss -ltnp | grep :8000` shows what holds
@@ -277,11 +293,6 @@ It prints per-class precision/recall on a held-out split, then saves the model.
   the router's own address, which happens when the management IPs swapped on a
   deploy. Check with `containerlab inspect`. The pinned `mgmt-ipv4` in the
   topology prevents this; destroy and redeploy if the lab predates it.
-- **`ModuleNotFoundError: No module named 'sklearn'` / `'anthropic'`** — re-run
-  the `pip install -r requirements.txt` line from Step 5.
-- **`LLM escalation skipped: no Anthropic credentials`** — `ANTHROPIC_API_KEY`
-  isn't set in *this* terminal (Step 7). Other `skipped` reasons (rate limit,
-  connection error) are printed the same way.
 - **`Root cause: The diagnostic tools could not reach the router`** — every tool
   failed over SSH; same fixes as `Unable to connect to port 22` above.
 - **ML results look off after upgrading scikit-learn** — retrain with
