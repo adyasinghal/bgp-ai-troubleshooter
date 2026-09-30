@@ -132,6 +132,10 @@ export BGP_LLM_NUM_CTX=16384                         # context window (tokens)
 export BGP_LLM_TIMEOUT=300                           # seconds to wait for an answer
 ```
 
+To use Claude instead of the local model, set `BGP_LLM_PROVIDER=anthropic` and
+`ANTHROPIC_API_KEY` (the model defaults to `claude-opus-5-5`; change it with
+`BGP_LLM_MODEL`). All of these settings live in `analyzer/llm_client.py`.
+
 The LLM is only called when both the rules and the ML engine are stuck. It's free, and nothing leaves your machine. Add `--no-llm` to any analyzer run to skip it. 
 
 ## Step 8 — Run the Analyze stage (healthy path)
@@ -267,6 +271,28 @@ python3 -m analyzer.ml_engine train --cases cases.jsonl
 ```
 
 It prints per-class precision/recall on a held-out split, then saves the model.
+
+---
+
+## Running the tests
+
+The tests need no lab, API server or Ollama. They replay real FRR output
+through the real REST API in-process, with SSH and the LLM faked. Run them
+from the repo root, in the VM or anywhere with `requirements.txt` installed:
+
+```bash
+python3 -m pytest
+```
+
+- `tests/test_tools.py`: each tool's parser on real `vtysh` output
+- `tests/test_rules_db.py`: the seed, schema versioning, the escalation chain
+- `tests/test_llm_client.py`: the Ollama and Claude backends with the network mocked
+- `tests/test_analyzer.py`: the whole rules → ML → LLM pipeline for each fault
+  scenario from Steps 8–11, plus interface down and TCP blocked
+
+The scenarios' device output lives in `tests/scenarios.py`. The tests train
+their own ML model in a temp dir and use a temp Rules DB, so they never touch
+`analyzer/models/` or `rules_db/rules.db`.
 
 ---
 

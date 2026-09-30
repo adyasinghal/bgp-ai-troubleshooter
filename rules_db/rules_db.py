@@ -8,6 +8,8 @@ result doesn't resolve the case (see `next_intent_on_fail` chaining in the
 rule book, e.g. bgp_state_check -> interface_check -> tcp_port_check -> config_check).
 """
 
+import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,8 @@ from typing import Optional
 
 DB_PATH = Path(__file__).parent / "rules.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,17 +46,24 @@ class RulesDB:
         self._init_db()
 
     def _init_db(self):
-        fresh = not self.db_path.exists()
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        if fresh:
-            with open(SCHEMA_PATH) as f:
-                self.conn.executescript(f.read())
-            self.conn.commit()
+        schema = SCHEMA_PATH.read_text()
+        wanted = _schema_version(schema)
+        current = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if current != wanted:
+            # A new DB reports version 0. An old one is rebuilt from the seed,
+            # which drops rules added at runtime with add_rule/upsert_tool.
+            log.info("Rules DB %s is at schema version %s, schema.sql is %s; rebuilding from seed",
+                     self.db_path, current, wanted)
+            self._apply(schema)
 
     def reload_seed(self):
         """Drop and re-apply schema.sql. Useful in dev when the rule book changes."""
-        self.conn.executescript(open(SCHEMA_PATH).read())
+        self._apply(SCHEMA_PATH.read_text())
+
+    def _apply(self, schema: str):
+        self.conn.executescript(schema)
         self.conn.commit()
 
     # --- lookups used by the Reasoning loop ---
@@ -114,6 +125,14 @@ class RulesDB:
             (intent, tool_id, priority, condition, next_intent_on_fail),
         )
         self.conn.commit()
+
+
+def _schema_version(schema: str) -> int:
+    """The `PRAGMA user_version = N` that schema.sql sets."""
+    m = re.search(r"PRAGMA\s+user_version\s*=\s*(\d+)", schema, re.IGNORECASE)
+    if not m:
+        raise ValueError(f"{SCHEMA_PATH} must set PRAGMA user_version")
+    return int(m.group(1))
 
 
 if __name__ == "__main__":
