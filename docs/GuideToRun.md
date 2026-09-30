@@ -18,11 +18,11 @@ Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the 
 
 ## Prerequisites (one-time)
 
-Everything in `InitialSetup.md`: the `clab` VM with Docker and Containerlab, the router image, the Python packages, and Ollama with `qwen2.5:7b` on the Mac. Without Ollama the analyzer still works: agent mode falls back to the rule chain and the verdict says so.
+Everything in `InitialSetup.md`: the `clab` VM with Docker and Containerlab, the router image, the Python packages, and Ollama with `qwen2.5:7b` on the Mac. Without Ollama the analyzer still works: agent mode falls back to the rule chain.
 
 ## Layout
 
-You'll use two terminals, both inside the VM (`orb -m clab`):
+Two terminals, both inside the VM (`orb -m clab`):
 - **Terminal 1** — runs the REST API (stays open).
 - **Terminal 2** — runs the tests and the analyzer.
 

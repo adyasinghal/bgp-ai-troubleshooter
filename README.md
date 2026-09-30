@@ -1,5 +1,17 @@
 # Real-Time AI Network Troubleshooter for BGP Switches
 
+When a BGP session between two routers goes down, finding out why usually means an engineer logging in, running a series of `show` commands and reading through the output. This project is an AI troubleshooter that does that work: you describe the problem in plain language, it investigates the switch itself and tells you the root cause and how to fix it.
+
+The aim is a tool an engineer can attach to a misbehaving BGP device and simply follow its recommendation. It's being built in phases:
+
+1. **Configuration faults** (current): diagnose misconfigurations such as a shut down neighbor, a wrong remote AS, a down interface or a blocked BGP port.
+2. **Log-based detection**: find anomalies from event and support logs.
+3. **Real-time monitoring**: collect data periodically and suggest fixes as problems appear, with a dashboard for alerts.
+
+It combines deterministic rules, an ML classifier and an LLM, so it stays accurate on known faults while still being able to reason about new ones. It's developed and tested on FRRouting routers in a Containerlab lab.
+
+Built as part of the HPE CPP-2 program.
+
 Suggested repo structure  
 
 ```

@@ -1,14 +1,14 @@
 # Setup Guide: Running BGP Commands on OrbStack Using Containerlab and FRR
 
-One-time setup. For running the lab and the troubleshooter each session, see `GuideToRun.md`.
+One-time setup. For running the lab, see `GuideToRun.md`.
 
-FRR: It's an open-source routing suite — the software that actually speaks BGP, OSPF, IS-IS, and PIM. Think of it as the routing brain that vendors like Cisco or Juniper wrap in their own OS; FRR is that brain, standalone and free.
+FRR: It's an open-source routing suite — the software that actually speaks BGP, OSPF, IS-IS, and PIM.
 
-Containerlab: This tool provides a lightweight, container-based approach to orchestrate and spin up complex multi-router network topologies instantly.
+Containerlab: It provides a lightweight, container-based approach to orchestrate and spin up complex multi-router network topologies instantly.
 
-OrbStack: Since you are developing on a Mac, OrbStack serves as a fast, resource-efficient container runtime engine that executes these Docker-based labs seamlessly.
+OrbStack: It serves as a fast, resource-efficient container runtime engine that executes these Docker-based labs seamlessly.
 
-macOS (Darwin, arm64)  
+System (macOS - Darwin, arm64)  
 ├── Ollama (local LLM)  
 └── OrbStack VM: Ubuntu arm64  ← real Linux kernel  
     ├── dockerd  
@@ -90,7 +90,7 @@ The lab itself is defined in `lab/containerlab/topology.clab.yml`: two routers b
 
 ---
 
-## Ollama (on the Mac)
+## Ollama 
 
 The troubleshooter's LLM is a free local model served by Ollama. It runs on the Mac, not in the VM, so it can use the Apple GPU. In a normal macOS terminal (not `orb -m clab`):
 
