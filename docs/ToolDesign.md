@@ -107,6 +107,7 @@ And the rule book is queried over REST at:
 GET /rules/{intent}   -> tools to call + next_intent_on_fail
 GET /rules/intents    -> all known intents
 GET /rules/tools      -> all tools in the cohort
+GET /rules/catalog    -> every tool (args, when to use it) and every rule, in one call
 ```
 
 ## Example output

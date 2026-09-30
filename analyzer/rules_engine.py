@@ -1,11 +1,16 @@
 """The reasoning loop: ask the rulebook, call the tool, decide, escalate.
 
 Escalation order: rule chain -> ML engine -> LLM -> human.
+
+evaluate() is the rule book's verdict on a single tool result. The rule chain
+below acts on it directly; the LLM agent gets it as a deterministic finding
+next to each tool's output.
 """
 import json
 import logging
 
 from analyzer import llm_escalation, ml_engine
+from analyzer.tool_registry import ToolRegistry
 from analyzer.triage import triage
 from analyzer.verdict import Verdict
 
@@ -14,17 +19,8 @@ ML_CONFIDENCE_THRESHOLD = 0.7   # below this, the ML guess goes to the LLM as a 
 log = logging.getLogger(__name__)
 
 
-def _payload(tool_id: str, ctx: dict) -> dict:
-    host, peer = ctx["host"], ctx.get("peer")
-    if tool_id == "bgp_state":
-        return {"host": host, "peer": peer}
-    if tool_id == "tcp_port":
-        return {"host": host, "peer_ip": peer, "port": 179}
-    return {"host": host}   # interface + config just need the host
-
-
-def _evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
-    """decision: root_cause | healthy | continue."""
+def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
+    """decision: root_cause | healthy | continue, plus cause and fix when decided."""
     if not result.get("success", True):
         return {"decision": "continue"}   # tool failed to run; its output proves nothing
 
@@ -69,6 +65,7 @@ def diagnose(client, question: str, host: str, peer: str,
     intent = triage(question)
     log.info("Triage: starting intent %s", intent)
     ctx = {"host": host, "peer": peer}
+    registry = ToolRegistry.load(client)
     checked, evidence = [], []
 
     while intent:
@@ -77,9 +74,7 @@ def diagnose(client, question: str, host: str, peer: str,
                  [t["tool_id"] for t in rule["tools"]], rule.get("next_intent_on_fail"))
         for tool in rule["tools"]:
             tool_id = tool["tool_id"]
-            payload = _payload(tool_id, ctx)
-            log.info("Calling tool %s: POST %s %s", tool_id, tool["endpoint"], payload)
-            result = client.call_tool(tool["endpoint"], payload)
+            result = registry.execute(client, tool_id, {}, ctx, evidence)
             if result.get("success", True):
                 log.info("Tool %s succeeded", tool_id)
             else:
@@ -96,7 +91,7 @@ def diagnose(client, question: str, host: str, peer: str,
                 "raw_output": result.get("raw_output"),
             })
 
-            outcome = _evaluate(tool_id, result, ctx)
+            outcome = evaluate(tool_id, result, ctx)
             log.info("Rule decision after %s: %s%s", tool_id, outcome["decision"],
                      f" ({outcome['cause']})" if "cause" in outcome else "")
             if outcome["decision"] in ("root_cause", "healthy"):

@@ -17,6 +17,12 @@ class RestClient:
         r.raise_for_status()
         return r.json()
 
+    def get_catalog(self) -> dict:
+        r = requests.get(f"{self.base_url}/rules/catalog", timeout=self.timeout)
+        log.debug("GET %s -> %s (%.2fs)", r.url, r.status_code, r.elapsed.total_seconds())
+        r.raise_for_status()
+        return r.json()
+
     def call_tool(self, endpoint: str, payload: dict) -> dict:
         r = requests.post(f"{self.base_url}{endpoint}", json=payload, timeout=self.timeout)
         log.debug("POST %s -> %s (%.2fs)", r.url, r.status_code, r.elapsed.total_seconds())

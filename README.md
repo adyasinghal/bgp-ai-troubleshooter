@@ -27,6 +27,7 @@ bgp-ai-troubleshooter/
 │   ├── rest_client.py            (calls API over HTTP)  
 │   ├── triage.py                 (question → starting intent)  
 │   ├── rules_engine.py           (the reasoning loop)  
+│   ├── tool_registry.py          (tool catalog: validates and runs tool calls)  
 │   ├── verdict.py                (builds root_cause/fix output)  
 │   ├── ml_engine.py              (scikit-learn fault classifier)  
 │   └── llm_escalation.py         (hands unresolved cases to Claude)  

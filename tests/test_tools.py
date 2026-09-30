@@ -13,21 +13,33 @@ def run(tool_cls, scenario: str, *args):
     return tool_cls(FakeDeviceClient(SCENARIOS[scenario])).run(HOST, *args)
 
 
-@pytest.mark.parametrize("scenario, state", [
-    ("healthy", "Established"),          # "(Policy)" in the State/PfxRcd column
-    ("neighbor_shutdown", "Idle"),       # "Idle (Admin)"
-    ("remote_as_mismatch", "Idle"),
-    ("interface_down", "Active"),
-    ("tcp_blocked", "Connect"),
+@pytest.mark.parametrize("scenario, state, reason", [
+    ("healthy", "Established", "Policy"),    # "(Policy)" in the State/PfxRcd column
+    ("neighbor_shutdown", "Idle", "Admin"),  # "Idle (Admin)"
+    ("remote_as_mismatch", "Idle", None),
+    ("interface_down", "Active", None),
+    ("tcp_blocked", "Connect", None),
 ])
-def test_bgp_state_reads_peer_state(scenario, state):
+def test_bgp_state_reads_peer_state(scenario, state, reason):
     result = run(BGPStateTool, scenario, PEER)
     assert result.success
-    assert result.parsed == {"peers": {PEER: state}, "queried_peer_state": state}
+    assert result.parsed == {
+        "peers": {PEER: state},
+        "state_reasons": {PEER: reason} if reason else {},
+        "queried_peer_state": state,
+        "queried_peer_state_reason": reason,
+    }
+
+
+def test_bgp_state_idle_reason_without_space():
+    line = "10.0.0.9        4      65003         0         0        0    0    0    never  Idle(PfxCt)        0 N/A"
+    parsed = BGPStateTool(FakeDeviceClient({}))._parse(line, "10.0.0.9")
+    assert (parsed["queried_peer_state"], parsed["queried_peer_state_reason"]) == ("Idle", "PfxCt")
 
 
 def test_bgp_state_unknown_peer():
-    assert run(BGPStateTool, "healthy", "10.9.9.9").parsed["queried_peer_state"] == "unknown"
+    parsed = run(BGPStateTool, "healthy", "10.9.9.9").parsed
+    assert (parsed["queried_peer_state"], parsed["queried_peer_state_reason"]) == ("unknown", None)
 
 
 def test_interface_all_up():

@@ -82,6 +82,16 @@ def list_tools():
     return {"tools": [t.__dict__ for t in rules_db.list_tools()]}
 
 
+# Declared before /rules/{intent} so "catalog" isn't taken as an intent name.
+@app.get("/rules/catalog")
+def catalog():
+    """Every tool (with its args and usage notes) and every rule, in one call for the LLM agent."""
+    return {
+        "tools": [t.__dict__ for t in rules_db.list_tools()],
+        "rules": [r.__dict__ for r in rules_db.list_rules()],
+    }
+
+
 @app.get("/rules/{intent}")
 def get_rule_for_intent(intent: str):
     tools = rules_db.get_tools_for_intent(intent)

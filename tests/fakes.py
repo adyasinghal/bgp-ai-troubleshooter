@@ -59,6 +59,11 @@ class LabClient:
         r.raise_for_status()
         return r.json()
 
+    def get_catalog(self) -> dict:
+        r = self.http.get("/rules/catalog")
+        r.raise_for_status()
+        return r.json()
+
     def call_tool(self, endpoint: str, payload: dict) -> dict:
         r = self.http.post(endpoint, json=payload)
         r.raise_for_status()
