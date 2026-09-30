@@ -130,7 +130,7 @@ class Investigation:
         self.calls[key] = n
         result = self.registry.execute(self.client, tool_id, args, self.ctx, self.evidence)
         finding = rules_engine.evaluate(tool_id, result, self.ctx)
-        if finding["decision"] == "continue":
+        if finding["decision"] == "continue" and "hint" not in finding:
             finding["suggested_next_intent"] = self.registry.next_intent_after(tool_id)
         else:
             finding["note"] = "The rule book considers this decided. Conclude unless other evidence contradicts it."
@@ -252,6 +252,12 @@ def summarize(tool_id: str, result: dict) -> str:
     if tool_id == "bgp_state":
         reason = p.get("queried_peer_state_reason")
         return f"peer {p.get('queried_peer_state', '?')}" + (f" ({reason})" if reason else "")
+    if tool_id == "bgp_neighbor":
+        if not p.get("configured", True):
+            return "not configured"
+        note = p.get("notification")
+        return f"{p.get('state')}, last reset: " + (
+            f"notification {note['direction']} ({note['error']})" if note else (p.get("last_reset") or "never"))
     if tool_id == "interface":
         ifaces = p.get("interfaces", {})
         down = [n for n, i in ifaces.items() if "down" in (i.get("link_state"), i.get("admin_state"))]

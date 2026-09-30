@@ -259,9 +259,17 @@ python3 -m analyzer.run "My BGP peer won't come up" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-The agent sees `Idle`, checks the config (`remote-as 65009`) and should
-conclude `remote_as_mismatch`. The tools only see router1, so double-check the
-AS in the suggested fix against router2 (65002).
+The agent sees `Idle`, then `bgp_neighbor` shows router1 sent a NOTIFICATION
+(Bad Peer AS) and reads the AS router2 really uses from its OPEN:
+
+```
+Root cause:    This router expects AS 65009 for 172.20.20.3, but the peer uses AS 65002.
+Suggested fix: router bgp 65001 neighbor 172.20.20.3 remote-as 65002
+Tools checked: bgp_state -> bgp_neighbor
+```
+
+The same tool catches a neighbor removed on router2 (`Notification received
+(Cease/Peer De-configured)`), which the other four tools can't see.
 
 With `--mode rules`: when the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
 case goes to the LLM. Expect `Decided by: llm` with its root cause and fix,

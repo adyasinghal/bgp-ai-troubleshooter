@@ -18,12 +18,14 @@ CONNECT_ERRORS = ("NoValidConnectionsError", "Unable to connect", "timed out", "
 
 # Hints are for the LLM agent; the rule chain ignores them.
 STATE_HINTS = {
-    "Active": "Active: the TCP session to the peer is not forming. Check the interface to the peer and TCP port 179.",
-    "Connect": "Connect: the TCP session to the peer is not forming. Check the interface to the peer and TCP port 179.",
+    "Active": ("Active: the TCP session to the peer is not forming or keeps being closed. "
+               "Call bgp_neighbor next: it shows whether TCP ever came up and the last reset reason."),
+    "Connect": ("Connect: the TCP session to the peer is not forming. "
+                "Call bgp_neighbor next: it shows whether TCP ever came up and the last reset reason."),
     "Idle": ("Idle with no reason: the neighbor is NOT administratively shut down (that shows as Idle (Admin)). "
              "The session keeps failing and restarting, usually because the OPEN exchange is rejected "
              "(remote-as mismatch, router-id conflict) or the peer doesn't have this router configured. "
-             "Check the config's neighbor lines."),
+             "Call bgp_neighbor next: it shows the NOTIFICATION behind it."),
     "OpenSent": "OpenSent: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities, MD5).",
     "OpenConfirm": "OpenConfirm: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities, MD5).",
     "unknown": ("The peer is not listed in `show bgp summary`, so it is most likely not configured on this router. "
@@ -60,6 +62,9 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
             hint = hint.format(peer=ctx.get("peer") or "<peer>")
         return {"decision": "continue", **({"hint": hint} if hint else {})}
 
+    if tool_id == "bgp_neighbor":
+        return _neighbor_finding(parsed, ctx)
+
     if tool_id == "interface":
         down = [n for n, i in parsed.get("interfaces", {}).items()
                 if i.get("link_state") == "down" or i.get("admin_state") == "down"]
@@ -85,6 +90,57 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
         return {"decision": "continue", "hint": _neighbor_facts(result.get("raw_output") or "", ctx.get("peer"))}
 
     return {"decision": "continue"}
+
+
+def _neighbor_finding(p: dict, ctx: dict) -> dict:
+    peer = ctx.get("peer")
+    if not p.get("configured", True):
+        return {"decision": "root_cause", "fault_class": "neighbor_missing",
+                "cause": f"Neighbor {peer} is not configured on this router",
+                "fix": f"router bgp <local-asn> / neighbor {peer} remote-as <peer-asn>"}
+    if p.get("state") == "Established":
+        return {"decision": "healthy", "fault_class": "healthy",
+                "cause": f"BGP peer {peer} is Established",
+                "fix": "No action needed — the session is up."}
+
+    local_as, remote_as = p.get("local_as"), p.get("remote_as")
+    me = p.get("local_host") or "<this router>"
+    on_peer = f"on {p.get('hostname') or peer}"
+    if p.get("admin_shutdown"):
+        return {"decision": "root_cause", "fault_class": "neighbor_shutdown",
+                "cause": f"Neighbor {peer} is administratively shut down on this router",
+                "fix": f"router bgp {local_as} / no neighbor {peer} shutdown"}
+
+    note = p.get("notification") or {}
+    error, sent = note.get("error", ""), note.get("direction") == "sent"
+    if "Bad Peer AS" in error and sent:
+        actual = p.get("peer_open_as")
+        return {"decision": "root_cause", "fault_class": "remote_as_mismatch",
+                "cause": f"This router expects AS {remote_as} for {peer}"
+                         + (f", but the peer uses AS {actual}" if actual else ", but the peer's OPEN has another AS"),
+                "fix": f"router bgp {local_as} / neighbor {peer} remote-as {actual or '<peer-asn>'}"}
+    if "Bad Peer AS" in error:
+        return {"decision": "root_cause", "fault_class": "remote_as_mismatch",
+                "cause": f"{peer} rejects this router's AS {local_as}: its remote-as for {me} is wrong",
+                "fix": f"{on_peer}: router bgp {remote_as} / neighbor {me} remote-as {local_as}"}
+    if "Peer De-configured" in error and not sent:
+        return {"decision": "root_cause", "fault_class": "neighbor_missing",
+                "cause": f"{peer} removed its neighbor config for this router",
+                "fix": f"{on_peer}: router bgp {remote_as} / neighbor {me} remote-as {local_as}"}
+    if "Administrative Shutdown" in error and not sent:
+        return {"decision": "root_cause", "fault_class": "neighbor_shutdown",
+                "cause": f"{peer} has shut down its neighbor for this router",
+                "fix": f"{on_peer}: router bgp {remote_as} / no neighbor {me} shutdown"}
+
+    if p.get("connections_established") == 0:
+        return {"decision": "continue",
+                "hint": f"State {p.get('state')} and the TCP session has never come up (0 connections), "
+                        f"so the fault is below BGP: check the interface to the peer and TCP port 179. "
+                        f"'Waiting for peer OPEN' only means no OPEN ever arrived."}
+    return {"decision": "continue",
+            "hint": f"State {p.get('state')}; the session came up {p.get('connections_established', '?')} "
+                    f"time(s) and dropped {p.get('connections_dropped', '?')}. "
+                    f"Last reset: {p.get('last_reset') or 'never'}."}
 
 
 def _neighbor_facts(running: str, peer: str | None) -> str:

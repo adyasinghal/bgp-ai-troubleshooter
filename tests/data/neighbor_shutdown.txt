@@ -1,0 +1,52 @@
+BGP neighbor is 172.20.20.3, remote AS 65002, local AS 65001, external link
+  Local Role: undefined
+  Remote Role: undefined
+Hostname: router2
+ Administratively shut down
+  BGP version 4, remote router ID 172.20.20.3, local router ID 172.20.20.2
+  BGP state = Idle
+  Last read 00:00:18, Last write 00:00:18
+  Hold time is 180 seconds, keepalive interval is 60 seconds
+  Configured hold time is 180 seconds, keepalive interval is 60 seconds
+  Configured conditional advertisements interval is 60 seconds
+  Graceful restart information:
+    Local GR Mode: Helper*
+
+    Remote GR Mode: NotApplicable
+
+    R bit: False
+    N bit: False
+    Timers:
+      Configured Restart Time(sec): 120
+      Received Restart Time(sec): 120
+  Message statistics:
+    Inq depth is 0
+    Outq depth is 0
+                         Sent       Rcvd
+    Opens:                  1          1
+    Notifications:          1          0
+    Updates:                1          1
+    Keepalives:             1          1
+    Route Refresh:          0          0
+    Capability:             0          0
+    Total:                  4          3
+  Minimum time between advertisement runs is 0 seconds
+
+ For address family: IPv4 Unicast
+  Not part of any update group
+  Community attribute sent to this neighbor(all)
+  Inbound updates discarded due to missing policy
+  Outbound updates discarded due to missing policy
+  0 accepted prefixes
+
+  Connections established 1; dropped 1
+  Last reset 00:00:03,  Admin. shutdown
+  External BGP neighbor may be up to 1 hops away.
+Local host: 172.20.20.2, Local port: 57716
+Foreign host: 172.20.20.3, Foreign port: 179
+Nexthop: 172.20.20.2
+Nexthop global: 3fff:172:20:20::3
+Nexthop local: fe80::cf0:8bff:fed2:8301
+BGP connection: shared network
+BGP Connect Retry Timer in Seconds: 120
+Read thread: off  Write thread: off  FD used: -1

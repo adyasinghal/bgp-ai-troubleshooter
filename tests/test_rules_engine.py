@@ -59,3 +59,40 @@ def test_ssh_failure_hint(lab):
 
 def test_other_failure_has_no_hint():
     assert evaluate("bgp_state", {"success": False, "error": "HTTPError: 500"}, CTX) == {"decision": "continue"}
+
+
+@pytest.mark.parametrize("scenario, decision, fault_class, fix", [
+    ("healthy", "healthy", "healthy", "No action needed — the session is up."),
+    ("neighbor_shutdown", "root_cause", "neighbor_shutdown", "router bgp 65001 / no neighbor 172.20.20.3 shutdown"),
+    ("remote_as_mismatch", "root_cause", "remote_as_mismatch", "router bgp 65001 / neighbor 172.20.20.3 remote-as 65002"),
+    ("peer_deconfigured", "root_cause", "neighbor_missing",
+     "on router2: router bgp 65002 / neighbor 172.20.20.2 remote-as 65001"),
+])
+def test_neighbor_findings(lab, scenario, decision, fault_class, fix):
+    f = finding(lab, scenario, "bgp_neighbor")
+    assert (f["decision"], f["fault_class"], f["fix"]) == (decision, fault_class, fix)
+
+
+def test_neighbor_remote_as_cause_names_both_asns(lab):
+    assert finding(lab, "remote_as_mismatch", "bgp_neighbor")["cause"] == (
+        "This router expects AS 65009 for 172.20.20.3, but the peer uses AS 65002")
+
+
+def test_neighbor_never_up_is_a_hint(lab):
+    f = finding(lab, "tcp_blocked", "bgp_neighbor")
+    assert f["decision"] == "continue"
+    assert "never come up" in f["hint"] and "TCP port 179" in f["hint"]
+
+
+def test_neighbor_rejected_by_peer():
+    parsed = {"configured": True, "state": "Idle", "local_as": 65001, "remote_as": 65002,
+              "local_host": "172.20.20.2", "hostname": "router2",
+              "notification": {"direction": "received", "error": "OPEN Message Error/Bad Peer AS"}}
+    f = evaluate("bgp_neighbor", {"success": True, "parsed": parsed}, CTX)
+    assert f["fault_class"] == "remote_as_mismatch"
+    assert f["fix"] == "on router2: router bgp 65002 / neighbor 172.20.20.2 remote-as 65001"
+
+
+def test_neighbor_not_configured():
+    f = evaluate("bgp_neighbor", {"success": True, "parsed": {"configured": False}}, CTX)
+    assert (f["decision"], f["fault_class"]) == ("root_cause", "neighbor_missing")

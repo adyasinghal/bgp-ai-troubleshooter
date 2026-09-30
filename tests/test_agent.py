@@ -46,7 +46,7 @@ def test_neighbor_shutdown_in_two_tool_calls(lab, scripted_llm):
     step1 = second["steps"][0]
     assert step1["result"]["parsed"]["queried_peer_state_reason"] == "Admin"
     assert step1["rule_finding"]["decision"] == "continue"
-    assert step1["rule_finding"]["suggested_next_intent"] == "interface_check"
+    assert "suggested_next_intent" not in step1["rule_finding"]
     assert step1["rule_finding"]["hint"].startswith("Idle (Admin): the neighbor is administratively shut down")
     step2 = third["steps"][1]["result"]
     assert "no baseline" in step2["parsed"]["diff"]
@@ -62,7 +62,7 @@ def test_triage_reaches_the_agent(lab, scripted_llm):
     (t,) = llm.triage_calls
     assert QUESTION in t["user"] and "interface_check" in t["user"]
     assert t["schema"]["properties"]["plan"]["items"]["enum"] == [
-        "bgp_state_check", "config_check", "interface_check", "tcp_port_check"]
+        "bgp_state_check", "config_check", "interface_check", "neighbor_check", "tcp_port_check"]
     assert case_of(llm.calls[0])["triage"]["claimed_state"] == "Active"
     assert v.triage["hypotheses"][0]["fault_class"] == "interface_down"
     assert "Triage:        peer is down (suspects: interface_down, tcp_unreachable)" in v.pretty()
@@ -103,6 +103,13 @@ def test_rule_finding_shown_and_agreement(lab, scripted_llm):
     assert v.rules_agree is True
     assert v.steps[1]["summary"] == "down: eth1 [rule: root_cause]"
     assert "Rules agree:   yes" in v.pretty()
+
+
+def test_chain_suggestion_only_without_a_hint(lab, scripted_llm):
+    llm = scripted_llm(call("bgp_state"), call("interface"), conclude("other", resolved=False))
+    investigate(lab("neighbor_shutdown"), QUESTION, HOST, PEER)
+    finding = case_of(llm.calls[2])["steps"][1]["rule_finding"]
+    assert finding == {"decision": "continue", "suggested_next_intent": "tcp_port_check"}
 
 
 def test_rules_disagreement_is_flagged(lab, scripted_llm):

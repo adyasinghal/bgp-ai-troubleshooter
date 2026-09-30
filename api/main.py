@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from tools.bgp_state import BGPStateTool
+from tools.bgp_neighbor import BGPNeighborTool
 from tools.interface import InterfaceTool
 from tools.tcp_port import TCPPortTool
 from tools.config import ConfigTool
@@ -21,6 +22,7 @@ app = FastAPI(title="Tool Cohort API", version="0.1.0")
 
 rules_db = RulesDB()
 bgp_tool = BGPStateTool()
+neighbor_tool = BGPNeighborTool()
 interface_tool = InterfaceTool()
 tcp_tool = TCPPortTool()
 config_tool = ConfigTool()
@@ -29,6 +31,11 @@ config_tool = ConfigTool()
 class BGPStateRequest(BaseModel):
     host: str
     peer: str | None = None
+
+
+class BGPNeighborRequest(BaseModel):
+    host: str
+    peer: str
 
 
 class InterfaceRequest(BaseModel):
@@ -49,6 +56,12 @@ class ConfigDiffRequest(BaseModel):
 @app.post("/tools/bgp/state")
 def bgp_state(req: BGPStateRequest):
     result = bgp_tool.run(req.host, req.peer)
+    return result.to_dict()
+
+
+@app.post("/tools/bgp/neighbor")
+def bgp_neighbor(req: BGPNeighborRequest):
+    result = neighbor_tool.run(req.host, req.peer)
     return result.to_dict()
 
 

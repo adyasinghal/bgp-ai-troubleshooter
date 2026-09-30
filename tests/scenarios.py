@@ -2,9 +2,11 @@
 
 router1 (172.20.20.2) is checked; its peer is router2 (172.20.20.3).
 "tcp" is the port-179 check output, "baseline" a saved config, and
-"unreachable" makes every SSH call fail.
+"unreachable" makes every SSH call fail. tests/data has `show bgp neighbors` output.
 """
+from pathlib import Path
 
+DATA = Path(__file__).parent / "data"
 HOST = "172.20.20.2"
 PEER = "172.20.20.3"
 
@@ -78,6 +80,11 @@ def _running_config(neighbor_lines: list[str]) -> str:
 
 
 _GOOD_CONFIG = _running_config(["neighbor 172.20.20.3 remote-as 65002"])
+NEIGHBOR = "show bgp neighbors 172.20.20.3"
+
+
+def _neighbor(name: str) -> str:
+    return (DATA / f"neighbor_{name}.txt").read_text()
 
 
 SCENARIOS = {
@@ -87,6 +94,7 @@ SCENARIOS = {
         "show interface": _interfaces(),
         "tcp": "REACHABLE",
         "show running-config": _GOOD_CONFIG,
+        NEIGHBOR: _neighbor("healthy"),
     },
     # GuideToRun Step 9: `neighbor 172.20.20.3 shutdown`.
     "neighbor_shutdown": {
@@ -95,6 +103,7 @@ SCENARIOS = {
         "tcp": "REACHABLE",
         "show running-config": _running_config(["neighbor 172.20.20.3 remote-as 65002",
                                                 "neighbor 172.20.20.3 shutdown"]),
+        NEIGHBOR: _neighbor("shutdown"),
     },
     # GuideToRun Step 10: remote-as set to 65009 instead of 65002, no baseline.
     "remote_as_mismatch": {
@@ -102,6 +111,7 @@ SCENARIOS = {
         "show interface": _interfaces(),
         "tcp": "REACHABLE",
         "show running-config": _running_config(["neighbor 172.20.20.3 remote-as 65009"]),
+        NEIGHBOR: _neighbor("remote_as"),
     },
     # Same fault as above, but a known-good baseline was saved (GuideToRun Step 11).
     "config_drift": {
@@ -110,18 +120,29 @@ SCENARIOS = {
         "tcp": "REACHABLE",
         "show running-config": _running_config(["neighbor 172.20.20.3 remote-as 65009"]),
         "baseline": _GOOD_CONFIG,
+        NEIGHBOR: _neighbor("remote_as"),
+    },
+    # router2 removed its neighbor for router1; router1 is still configured.
+    "peer_deconfigured": {
+        "show bgp summary": _summary(65002, "00:00:15", "Active", "0"),
+        "show interface": _interfaces(),
+        "tcp": "REACHABLE",
+        "show running-config": _GOOD_CONFIG,
+        NEIGHBOR: _neighbor("peer_deconfigured"),
     },
     "interface_down": {
         "show bgp summary": _summary(65002, "00:00:30", "Active", "0"),
         "show interface": _interfaces(eth1_up=False),
         "tcp": "UNREACHABLE",
         "show running-config": _GOOD_CONFIG,
+        NEIGHBOR: _neighbor("never_up"),
     },
     "tcp_blocked": {
         "show bgp summary": _summary(65002, "00:00:30", "Connect", "0"),
         "show interface": _interfaces(),
         "tcp": "UNREACHABLE",
         "show running-config": _GOOD_CONFIG,
+        NEIGHBOR: _neighbor("never_up"),
     },
     # The router's SSH is down, so every tool fails.
     "device_unreachable": {"unreachable": True},

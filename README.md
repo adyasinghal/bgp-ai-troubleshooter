@@ -16,7 +16,7 @@ bgp-ai-troubleshooter/
 │       └── topology.clab.yml       
 ├── tools/                          
 │   ├── \_\_init\_\_.py  base_tool.py  device_client.py  
-│   ├── bgp_state.py  interface.py  tcp_port.py  config.py  
+│   ├── bgp_state.py  bgp_neighbor.py  interface.py  tcp_port.py  config.py  
 ├── rules_db/                       
 │   ├── \_\_init\_\_.py  rules_db.py  schema.sql  
 ├── api/                                    # SSH/API connection and command execution  
@@ -39,6 +39,7 @@ bgp-ai-troubleshooter/
 │   ├── \_\_init\_\_.py  conftest.py  fakes.py  scenarios.py  
 │   ├── test_tools.py  test_rules_db.py  test_llm_client.py  test_analyzer.py  
 │   ├── test_rules_engine.py  test_tool_registry.py  test_agent.py  
+│   └── data/                           # real `show bgp neighbors` output  
 ├── pytest.ini  
 ├── .gitignore  
 ├── requirements.txt                        # Python dependencies  

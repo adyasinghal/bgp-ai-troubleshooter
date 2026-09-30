@@ -1,0 +1,60 @@
+BGP neighbor is 172.20.20.3, remote AS 65002, local AS 65001, external link
+  Local Role: undefined
+  Remote Role: undefined
+Hostname: router2
+  BGP version 4, remote router ID 0.0.0.0, local router ID 172.20.20.2
+  BGP state = Active
+  Last read 00:00:57, Last write 00:00:56
+  Hold time is 180 seconds, keepalive interval is 60 seconds
+  Configured hold time is 180 seconds, keepalive interval is 60 seconds
+  Configured conditional advertisements interval is 60 seconds
+  Graceful restart information:
+    Local GR Mode: Helper*
+
+    Remote GR Mode: NotApplicable
+
+    R bit: False
+    N bit: False
+    Timers:
+      Configured Restart Time(sec): 120
+      Received Restart Time(sec): 120
+  Message statistics:
+    Inq depth is 0
+    Outq depth is 0
+                         Sent       Rcvd
+    Opens:                  5          5
+    Notifications:          4          2
+    Updates:                3          3
+    Keepalives:            14         14
+    Route Refresh:          0          0
+    Capability:             0          0
+    Total:                 26         24
+  Minimum time between advertisement runs is 0 seconds
+
+ For address family: IPv4 Unicast
+  Not part of any update group
+  Community attribute sent to this neighbor(all)
+  Inbound updates discarded due to missing policy
+  Outbound updates discarded due to missing policy
+  0 accepted prefixes
+
+  Connections established 3; dropped 3
+  Last reset 00:00:15,  Notification received (Cease/Peer De-configured/Hard Reset)
+  Message received that caused BGP to send a NOTIFICATION:
+    FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF
+    00630104 FDEA00B4 AC141403 46020601
+    04000100 01020280 00020202 00020246
+    00020641 040000FD EA020206 00020645
+    04000101 01020B49 0907726F 75746572
+    32000204 4002C078 02094707 00010180
+    000000
+  External BGP neighbor may be up to 1 hops away.
+Local host: 172.20.20.2, Local port: 34482
+Foreign host: 172.20.20.3, Foreign port: 179
+Nexthop: 172.20.20.2
+Nexthop global: 3fff:172:20:20::3
+Nexthop local: fe80::cf0:8bff:fed2:8301
+BGP connection: shared network
+BGP Connect Retry Timer in Seconds: 120
+Next connect timer due in 106 seconds
+Read thread: off  Write thread: off  FD used: -1

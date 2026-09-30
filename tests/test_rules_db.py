@@ -7,7 +7,8 @@ import pytest
 from rules_db.rules_db import RulesDB, SCHEMA_PATH, ToolSpec, _schema_version
 
 CHAIN = ["bgp_state_check", "interface_check", "tcp_port_check", "config_check"]
-DEVICE_TOOLS = {"bgp_state", "interface", "tcp_port", "config"}
+DEVICE_TOOLS = {"bgp_state", "bgp_neighbor", "interface", "tcp_port", "config"}
+RULES = 5
 
 
 def rule_count(db: RulesDB) -> int:
@@ -20,7 +21,7 @@ def version(db: RulesDB) -> int:
 
 def test_fresh_db_is_seeded(tmp_path):
     db = RulesDB(tmp_path / "rules.db")
-    assert rule_count(db) == 4
+    assert rule_count(db) == RULES
     assert {t.tool_id for t in db.list_tools()} == DEVICE_TOOLS | {"ml_classify"}
     assert version(db) == _schema_version(SCHEMA_PATH.read_text())
 
@@ -63,7 +64,7 @@ def test_reload_seed_does_not_duplicate(tmp_path):
     db = RulesDB(tmp_path / "rules.db")
     db.reload_seed()
     db.reload_seed()
-    assert rule_count(db) == 4
+    assert rule_count(db) == RULES
 
 
 def test_old_db_is_rebuilt(tmp_path):
@@ -74,11 +75,11 @@ def test_old_db_is_rebuilt(tmp_path):
             SELECT intent, tool_id, priority, condition, next_intent_on_fail FROM rules;
         PRAGMA user_version = 0;
     """)
-    assert rule_count(db) == 8
+    assert rule_count(db) == 2 * RULES
     db.conn.close()
 
     db = RulesDB(path)
-    assert rule_count(db) == 4
+    assert rule_count(db) == RULES
     assert version(db) > 0
 
 
@@ -95,7 +96,7 @@ def test_broken_schema_leaves_db_intact(tmp_path, monkeypatch):
 
     monkeypatch.undo()
     db = RulesDB(path)
-    assert rule_count(db) == 4 and version(db) == _schema_version(SCHEMA_PATH.read_text())
+    assert rule_count(db) == RULES and version(db) == _schema_version(SCHEMA_PATH.read_text())
 
 
 def test_runtime_rules_survive_reopen(tmp_path):

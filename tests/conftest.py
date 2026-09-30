@@ -47,7 +47,7 @@ def lab(monkeypatch, tmp_path):
     def make(name: str) -> LabClient:
         scenario = SCENARIOS[name]
         device = FakeDeviceClient(scenario)
-        for tool in (api.bgp_tool, api.interface_tool, api.tcp_tool, api.config_tool):
+        for tool in (api.bgp_tool, api.neighbor_tool, api.interface_tool, api.tcp_tool, api.config_tool):
             monkeypatch.setattr(tool, "device_client", device)
         if "baseline" in scenario:
             api.config_tool.save_baseline(HOST, scenario["baseline"])

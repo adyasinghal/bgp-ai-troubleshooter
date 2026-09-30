@@ -45,6 +45,14 @@ INSERT INTO tools (tool_id, display_name, description, endpoint, base_command, k
      'OpenSent/OpenConfirm = TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities, MD5).',
      '{}',
      '{"host": "host", "peer": "peer"}'),
+    ('bgp_neighbor', 'BGP neighbor', 'Fetch one peer''s details and last reset reason',
+     '/tools/bgp/neighbor', 'show bgp neighbors <peer>', 'device',
+     'Configured remote/local AS, state, admin shutdown, and the last reset reason with any NOTIFICATION ' ||
+     '(Bad Peer AS, Peer De-configured, Administrative Shutdown...). When this router rejected the peer''s OPEN ' ||
+     'with Bad Peer AS, peer_open_as is the AS the peer really uses. Use it once bgp_state shows the peer is not ' ||
+     'Established. The last reset is history: it explains the failure only while the session is down.',
+     '{}',
+     '{"host": "host", "peer": "peer"}'),
     ('interface', 'Interface', 'Fetch interface detail / link state',
      '/tools/interface/detail', 'show interface', 'device',
      'Link state, admin state and IPv4 address per interface. Use when the peer is Active/Connect, or the question mentions a link, cable or port. ' ||
@@ -79,6 +87,8 @@ INSERT INTO rules (rule_id, intent, tool_id, priority, condition, next_intent_on
     (3, 'tcp_port_check',  'tcp_port',  1, 'Interface up but peer still stuck -> check TCP/179 reachability', 'config_check',
      'Peer Active/Connect with interfaces up, or the question mentions TCP, port 179, a firewall or reachability'),
     (4, 'config_check',    'config',    1, 'TCP reachable but session still down -> diff config for mismatch', NULL,
-     'Peer Idle or OpenSent/OpenConfirm, a suspected remote-as mismatch, a shut down or missing neighbor, or a recent config change');
+     'Peer Idle or OpenSent/OpenConfirm, a suspected remote-as mismatch, a shut down or missing neighbor, or a recent config change'),
+    (5, 'neighbor_check',  'bgp_neighbor', 1, 'Peer not Established -> read the last reset / NOTIFICATION', NULL,
+     'Peer Idle, Active or Connect; why a session keeps failing or resetting; a suspected fault on the peer');
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;

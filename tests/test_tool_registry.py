@@ -18,8 +18,9 @@ def registry(lab):
 
 def test_catalog_endpoint_not_shadowed_by_intent_route(lab):
     catalog = lab("healthy").get_catalog()
-    assert {t["tool_id"] for t in catalog["tools"]} == {"bgp_state", "interface", "tcp_port", "config", "ml_classify"}
-    assert len(catalog["rules"]) == 4
+    assert {t["tool_id"] for t in catalog["tools"]} == {
+        "bgp_state", "bgp_neighbor", "interface", "tcp_port", "config", "ml_classify"}
+    assert len(catalog["rules"]) == 5
 
 
 def test_for_prompt_is_compact_and_serializable(registry):
@@ -31,7 +32,8 @@ def test_for_prompt_is_compact_and_serializable(registry):
 
 
 def test_intents_and_next_intent(registry):
-    assert registry.intents() == ["bgp_state_check", "config_check", "interface_check", "tcp_port_check"]
+    assert registry.intents() == ["bgp_state_check", "config_check", "interface_check",
+                                  "neighbor_check", "tcp_port_check"]
     assert registry.next_intent_after("bgp_state") == "interface_check"
     assert registry.next_intent_after("config") is None
     assert registry.next_intent_after("ml_classify") is None

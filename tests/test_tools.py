@@ -1,8 +1,9 @@
-"""The four tools' parsers, fed real FRR 8.5 output through FakeDeviceClient."""
+"""Tool parsers, fed real FRR 8.5 output through FakeDeviceClient."""
 import pytest
 
 from tests.fakes import FakeDeviceClient
 from tests.scenarios import HOST, PEER, SCENARIOS
+from tools.bgp_neighbor import BGPNeighborTool
 from tools.bgp_state import BGPStateTool
 from tools.config import ConfigTool
 from tools.interface import InterfaceTool
@@ -87,3 +88,39 @@ def test_ssh_failure_is_reported_not_raised():
     result = run(BGPStateTool, "device_unreachable", PEER)
     assert result.success is False
     assert "Unable to connect" in result.error
+
+
+@pytest.mark.parametrize("scenario, state, reset", [
+    ("healthy", "Established", "Waiting for peer OPEN"),
+    ("neighbor_shutdown", "Idle", "Admin. shutdown"),
+    ("remote_as_mismatch", "Idle", "Notification sent (OPEN Message Error/Bad Peer AS)"),
+    ("peer_deconfigured", "Active", "Notification received (Cease/Peer De-configured/Hard Reset)"),
+    ("tcp_blocked", "Active", "Waiting for peer OPEN"),
+])
+def test_bgp_neighbor(scenario, state, reset):
+    p = run(BGPNeighborTool, scenario, PEER).parsed
+    assert (p["state"], p["last_reset"], p["local_as"]) == (state, reset, 65001)
+    assert p["admin_shutdown"] is (scenario == "neighbor_shutdown")
+
+
+def test_bgp_neighbor_reads_peer_as_from_open():
+    p = run(BGPNeighborTool, "remote_as_mismatch", PEER).parsed
+    assert (p["remote_as"], p["peer_open_as"]) == (65009, 65002)
+    assert p["notification"] == {"direction": "sent", "error": "OPEN Message Error/Bad Peer AS"}
+
+
+def test_bgp_neighbor_ignores_stale_open_dump():
+    p = run(BGPNeighborTool, "peer_deconfigured", PEER).parsed
+    assert "Message received that caused" in SCENARIOS["peer_deconfigured"]["show bgp neighbors 172.20.20.3"]
+    assert p["peer_open_as"] is None
+
+
+def test_bgp_neighbor_4_byte_as():
+    text = SCENARIOS["remote_as_mismatch"]["show bgp neighbors 172.20.20.3"]
+    text = text.replace("00630104 FDEA00B4", "00630104 5BA000B4").replace("040000FD EA020206", "0400030D 40020206")
+    assert BGPNeighborTool(FakeDeviceClient({}))._parse(text)["peer_open_as"] == 200000
+
+
+def test_bgp_neighbor_not_configured():
+    parsed = BGPNeighborTool(FakeDeviceClient({}))._parse("% No such neighbor in this view/vrf")
+    assert parsed == {"configured": False}

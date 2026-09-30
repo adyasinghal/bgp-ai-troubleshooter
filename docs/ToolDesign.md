@@ -101,6 +101,7 @@ rule1: BGP state check request        -> call tool1 (bgp_state)
 rule2: Interface check request        -> call tool2 (interface)
 rule3: TCP/port reachability request  -> call tool3 (tcp_port)
 rule4: Config drift check request     -> call tool4 (config)
+rule5: Neighbor detail request        -> call tool5 (bgp_neighbor)   # agent only, not in the chain
 ```
 
 Escalation chain (what to try next if a tool doesn't resolve the case):
@@ -135,12 +136,15 @@ tool1 (BGP state)  -> runs "show bgp summary"    -> sends each peer's session st
 tool2 (Interface)  -> runs "show interface"      -> sends link/admin state per interface
 tool3 (TCP / port) -> checks TCP port 179 to peer  -> sends transport reachability (up/down)
 tool4 (Config)     -> runs "show running-config"   -> diffs vs baseline, sends drift status
+tool5 (BGP neighbor) -> runs "show bgp neighbors <peer>" -> sends AS, state, shutdown, last reset
+                        and NOTIFICATION; on Bad Peer AS, the AS the peer really uses
 ```
 
 Each tool is reached over REST at:
 
 ```
 POST /tools/bgp/state        {"host": "...", "peer": "..."}
+POST /tools/bgp/neighbor     {"host": "...", "peer": "..."}
 POST /tools/interface/detail {"host": "...", "interface": "..."}   # interface optional
 POST /tools/tcp/check        {"host": "...", "peer_ip": "...", "port": 179}
 POST /tools/config/diff      {"host": "..."}
