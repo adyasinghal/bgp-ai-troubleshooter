@@ -16,7 +16,7 @@ ANSWER = {"resolved": True, "root_cause": "rc", "suggested_fix": "fx",
 
 @pytest.fixture(autouse=True)
 def real_chat_json(monkeypatch):
-    """Undo conftest's no_real_llm guard: these tests call chat_json with the network mocked."""
+    """Undo conftest's no_real_llm guard."""
     monkeypatch.setattr(llm_client, "chat_json", _REAL_CHAT_JSON)
 
 

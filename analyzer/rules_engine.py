@@ -1,10 +1,6 @@
 """The reasoning loop: ask the rulebook, call the tool, decide, escalate.
 
 Escalation order: rule chain -> ML engine -> LLM -> human.
-
-evaluate() is the rule book's verdict on a single tool result. The rule chain
-below acts on it directly; the LLM agent gets it as a deterministic finding
-next to each tool's output.
 """
 import json
 import logging
@@ -18,10 +14,9 @@ ML_CONFIDENCE_THRESHOLD = 0.7   # below this, the ML guess goes to the LLM as a 
 
 log = logging.getLogger(__name__)
 
-
 CONNECT_ERRORS = ("NoValidConnectionsError", "Unable to connect", "timed out", "AuthenticationException")
 
-# What each stuck state means, for the LLM agent. The rule chain ignores hints.
+# Hints are for the LLM agent; the rule chain ignores them.
 STATE_HINTS = {
     "Active": "Active: the TCP session to the peer is not forming. Check the interface to the peer and TCP port 179.",
     "Connect": "Connect: the TCP session to the peer is not forming. Check the interface to the peer and TCP port 179.",
@@ -43,11 +38,8 @@ REASON_HINTS = {
 
 
 def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
-    """decision: root_cause | healthy | continue. A decided finding also has cause,
-    fix and fault_class (an ml_engine.FAULTS label, for comparing with the LLM and ML).
-    Any finding may carry a hint: what the result means, for the LLM agent."""
+    """decision: root_cause | healthy | continue, plus cause/fix/fault_class when decided."""
     if not result.get("success", True):
-        # tool failed to run; its output proves nothing
         error = result.get("error") or ""
         if any(e in error for e in CONNECT_ERRORS):
             return {"decision": "continue",
@@ -66,7 +58,7 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
         hint = REASON_HINTS.get(parsed.get("queried_peer_state_reason")) or STATE_HINTS.get(state)
         if hint:
             hint = hint.format(peer=ctx.get("peer") or "<peer>")
-        return {"decision": "continue", **({"hint": hint} if hint else {})}   # dig deeper
+        return {"decision": "continue", **({"hint": hint} if hint else {})}
 
     if tool_id == "interface":
         down = [n for n, i in parsed.get("interfaces", {}).items()
@@ -96,7 +88,6 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
 
 
 def _neighbor_facts(running: str, peer: str | None) -> str:
-    """What the running config says about the peer, in one sentence."""
     if not peer:
         return "No peer given, so the config's neighbor lines weren't checked."
     lines = [l.strip() for l in running.splitlines() if l.strip().startswith(f"neighbor {peer} ")]

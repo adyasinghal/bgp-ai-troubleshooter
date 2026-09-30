@@ -14,11 +14,11 @@ class Verdict:
     ml_prediction: dict | None = None   # ML engine's opinion, even when it didn't decide
     next_checks: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)      # e.g. why the LLM was skipped
-    # LLM agent only
-    fault_class: str | None = None      # an ml_engine.FAULTS label, or "other"
-    rules_agree: bool | None = None     # None when no rule reached a decision
-    triage: dict | None = None          # how the question was read before any tool ran
-    steps: list[dict] = field(default_factory=list)     # {n, thought, tool, args, summary | rejected}
+    # agent mode
+    fault_class: str | None = None
+    rules_agree: bool | None = None     # None when no rule decided
+    triage: dict | None = None
+    steps: list[dict] = field(default_factory=list)
 
     def pretty(self) -> str:
         lines = [
@@ -29,6 +29,9 @@ class Verdict:
             + (f" (confidence {self.confidence})" if self.confidence else ""),
             f"Tools checked: {' -> '.join(self.checked)}",
         ]
+        if self.triage and self.triage.get("method") == "llm":
+            suspects = ", ".join(h["fault_class"] for h in self.triage["hypotheses"]) or "-"
+            lines.append(f"Triage:        {self.triage['symptom']} (suspects: {suspects})")
         if self.fault_class:
             lines.append(f"Fault class:   {self.fault_class}")
         if self.rules_agree is not None:

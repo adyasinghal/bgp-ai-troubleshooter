@@ -51,7 +51,6 @@ def test_validate_rejects(registry, tool_id, args, message):
 
 
 def test_validate_drops_context_keys_and_nones(registry):
-    # host/peer always come from the run, whatever the LLM sends
     assert registry.validate("tcp_port", {"host": "10.6.6.6", "peer_ip": "10.6.6.7"}) == {}
     assert registry.validate("interface", {"interface": None}) == {}
     assert registry.validate("interface", {"interface": "eth1"}) == {"interface": "eth1"}

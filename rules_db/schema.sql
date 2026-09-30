@@ -1,11 +1,9 @@
--- Rules DB: intent -> tool map, plus the tool catalog the LLM chooses from.
+-- Rules DB: intent -> tool map
 -- Consulted by the Orchestrator's Reasoning loop on every iteration of the
 -- "loops until resolved" cycle. Given an intent (extracted by the Triage
 -- agent LLM) it returns which tool(s) to call next, in priority order.
 --
--- This file is the source of truth: applying it resets both tables to the seed
--- below. rules_db.py re-applies it whenever the DB's user_version differs from
--- the one set at the bottom, so bump that number after any change here.
+-- Bump user_version at the bottom after any change; the DB is rebuilt from this file.
 
 DROP TABLE IF EXISTS rules;
 DROP TABLE IF EXISTS tools;
@@ -16,10 +14,10 @@ CREATE TABLE tools (
     description  TEXT NOT NULL,        -- what it's for
     endpoint     TEXT,                 -- REST path in the tool cohort service (NULL for internal tools)
     base_command TEXT NOT NULL,        -- canonical CLI command (vendor-neutral form)
-    kind         TEXT NOT NULL DEFAULT 'device',  -- 'device' (REST -> router) | 'internal' (runs in the analyzer)
-    when_to_use  TEXT NOT NULL DEFAULT '',        -- guidance for the LLM: what the output proves and doesn't
-    args_schema  TEXT NOT NULL DEFAULT '{}',      -- JSON: args the LLM may set, {name: {type, required, pattern, description}}
-    context_args TEXT NOT NULL DEFAULT '{}'       -- JSON: payload field -> run context key, e.g. {"peer_ip": "peer"}; never set by the LLM
+    kind         TEXT NOT NULL DEFAULT 'device',  -- 'device' | 'internal'
+    when_to_use  TEXT NOT NULL DEFAULT '',        -- for the LLM
+    args_schema  TEXT NOT NULL DEFAULT '{}',      -- JSON: args the LLM may set
+    context_args TEXT NOT NULL DEFAULT '{}'       -- JSON: payload field -> run context key (host/peer)
 );
 
 CREATE TABLE rules (
@@ -29,7 +27,7 @@ CREATE TABLE rules (
     priority     INTEGER NOT NULL DEFAULT 1,  -- lower = tried first when multiple tools match
     condition    TEXT,                 -- optional free-text condition/note for the reasoning loop
     next_intent_on_fail TEXT,          -- optional chaining: intent to try next if this tool's result doesn't resolve the case
-    symptoms     TEXT NOT NULL DEFAULT '',  -- for the LLM: which symptoms/questions this rule fits
+    symptoms     TEXT NOT NULL DEFAULT '',  -- for the LLM
     FOREIGN KEY (tool_id) REFERENCES tools(tool_id)
 );
 

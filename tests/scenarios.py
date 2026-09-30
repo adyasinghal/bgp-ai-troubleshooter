@@ -1,12 +1,8 @@
-"""Canned FRR 8.5 output for the lab's fault scenarios.
+"""FRR 8.5 output for each fault scenario, taken from real run logs.
 
-router1 (172.20.20.2) is the router under test; its peer is router2
-(172.20.20.3). The text is copied from real analyzer run logs, so the tools'
-parsers see exactly what the lab prints.
-
-Each scenario maps a command to its output. "tcp" is the port-179 check's
-output, "baseline" (optional) is a saved known-good config, and
-"unreachable": True makes every SSH call fail.
+router1 (172.20.20.2) is checked; its peer is router2 (172.20.20.3).
+"tcp" is the port-179 check output, "baseline" a saved config, and
+"unreachable" makes every SSH call fail.
 """
 
 HOST = "172.20.20.2"

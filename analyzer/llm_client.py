@@ -1,9 +1,4 @@
-"""LLM client: the one place that talks to the model backend.
-
-Every LLM call in the analyzer (escalation today, triage and the agent loop
-next) goes through chat_json(): send a system prompt and a user message, get
-back a dict that matches a JSON schema. Callers never see which backend
-answered, so switching between a local model and Claude is a config change.
+"""LLM client: chat_json() sends a prompt and returns a dict matching a JSON schema.
 
 Settings (environment variables):
   BGP_LLM_PROVIDER  ollama | anthropic                (default ollama)
@@ -13,9 +8,8 @@ Settings (environment variables):
   BGP_LLM_NUM_CTX   Ollama context window tokens      (default 16384)
   BGP_LLM_TIMEOUT   seconds to wait for Ollama        (default 300)
 
-ollama: a free local model; nothing leaves the machine. Ollama runs on the
-Mac; from the OrbStack VM it is reached at host.orb.internal.
-anthropic: Claude via the Anthropic API; needs ANTHROPIC_API_KEY.
+Ollama runs on the Mac and is reached from the VM at host.orb.internal.
+anthropic needs ANTHROPIC_API_KEY.
 """
 import json
 import logging
@@ -34,22 +28,17 @@ log = logging.getLogger(__name__)
 
 
 class LLMUnavailable(Exception):
-    """The LLM could not be reached, declined to answer, or gave an unusable answer."""
+    """The LLM couldn't be reached or gave an unusable answer."""
 
 
 def describe() -> str:
-    """Short label for logs, e.g. 'ollama model qwen2.5:7b at http://...'."""
     if PROVIDER == "ollama":
         return f"ollama model {MODEL} at {OLLAMA_URL}"
     return f"{PROVIDER} model {MODEL}"
 
 
 def chat_json(system: str, user: str, schema: dict, max_tokens: int = 2048) -> tuple[dict, str]:
-    """Ask the configured model for a JSON object matching `schema`.
-
-    Returns (answer, model name). Raises LLMUnavailable on any failure, so
-    callers can fall back without caring why the LLM didn't answer.
-    """
+    """Returns (answer, model name). Raises LLMUnavailable on any failure."""
     if PROVIDER == "ollama":
         text, model = _ollama(system, user, schema, max_tokens)
     elif PROVIDER == "anthropic":

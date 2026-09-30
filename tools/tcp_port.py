@@ -21,8 +21,7 @@ class TCPPortTool(BaseTool):
             f'&& echo REACHABLE || echo UNREACHABLE'
         )
         result = self.device_client.run_raw(host, command)
-        # Exact match: "UNREACHABLE" contains "REACHABLE", so a substring test
-        # reported every blocked port as reachable.
+        # exact match: "UNREACHABLE" contains "REACHABLE"
         reachable = result.output.strip() == "REACHABLE"
         parsed = {
             "peer_ip": peer_ip,

@@ -5,12 +5,10 @@ lab → REST tools → Analyze stage.
 
 The Analyze stage has two modes:
 
-- **agent** (default): the LLM reads the question, picks each tool from the
-  Rules DB catalog, reads each result together with the rule book's finding
-  for it, and decides what to check next or concludes. If the LLM can't be
-  reached, the run falls back to rules mode automatically.
-- **rules** (`--mode rules`): the fixed chain, escalating in this order and
-  stopping as soon as one step finds a root cause:
+- **agent** (default): the LLM picks each tool, reads the result, and decides
+  what to check next or concludes. Falls back to rules mode if the LLM is down.
+- **rules** (`--mode rules`): the fixed chain, stopping at the first step that
+  finds a root cause:
 
   ```
   rule chain → ML engine (scikit-learn) → LLM (local model via Ollama) → human
@@ -143,10 +141,9 @@ To use Claude instead of the local model, set `BGP_LLM_PROVIDER=anthropic` and
 `ANTHROPIC_API_KEY` (the model defaults to `claude-opus-5-5`; change it with
 `BGP_LLM_MODEL`). All of these settings live in `analyzer/llm_client.py`.
 
-It's free, and nothing leaves your machine. In agent mode the LLM is called
-once per step (a few seconds each on a Mac); in rules mode only when both the
-rules and the ML engine are stuck. Add `--no-llm` to any analyzer run to skip
-it entirely (this implies `--mode rules`).
+In agent mode the LLM is called once per step (a few seconds each); in rules
+mode only when the rules and ML are stuck. `--no-llm` skips it (implies
+`--mode rules`).
 
 ## Step 8 — Run the Analyze stage (healthy path)
 
@@ -155,8 +152,8 @@ python3 -m analyzer.run "My BGP peer is stuck at active state" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-With BGP up, the agent calls `bgp_state`, sees `Established` (the rule book
-agrees), and concludes after one tool call (~20s with qwen2.5:7b):
+With BGP up, the agent checks `bgp_state`, sees `Established` and concludes
+(~20s with qwen2.5:7b):
 
 ```
 Resolved:      True
@@ -164,6 +161,7 @@ Root cause:    BGP peer 172.20.20.3 is Established
 Suggested fix: No action needed — the session is up.
 Decided by:    agent (confidence high)
 Tools checked: bgp_state
+Triage:        BGP peer stuck at active state (suspects: tcp_unreachable, remote_as_mismatch, neighbor_shutdown, config_drift)
 Fault class:   healthy
 Rules agree:   yes
 ML opinion:    healthy (1.00)
@@ -173,14 +171,13 @@ Steps:
 Note:          Diagnosed by qwen2.5:7b
 ```
 
-- `Steps` is what the agent did and why; `[rule: ...]` marks a result the rule
-  book decided on its own.
-- `Rules agree` compares the agent's fault class with the rule book's finding.
-  `NO` means the LLM overrode a rule; read its steps before trusting it.
-- `ML opinion` is the ML engine's second opinion on the same evidence.
-- The model's wording and tool order can differ between runs.
+`Triage` is the LLM's reading of the question before any tool ran; an
+off-topic question stops there. `[rule: ...]` marks a result the rule book
+decided on its own. `Rules agree:
+NO` means the LLM overrode a rule, so check its steps. Wording and tool order
+vary between runs.
 
-To compare with the fixed rule chain, add `--mode rules`:
+With `--mode rules`:
 
 ```
 Resolved:      True
@@ -191,16 +188,14 @@ Tools checked: bgp_state
 ML opinion:    healthy (1.00)
 ```
 
-If Ollama isn't running, agent mode falls back to this rule chain on its own
-and adds `Note: LLM agent unavailable (...); fell back to the rule chain`.
+If Ollama isn't running, agent mode falls back to the rule chain and says so
+in a `Note:` line.
 
 Every run also writes a log file to `logs/run_<date>-<time>.log` (the path is
 printed as the last line, `Log file:`). It records each step in order: each
-agent decision with its reasoning (or, in rules mode, each rule fetched and
-escalation), every tool call with its payload, result and raw output, each
-rule finding, the ML prediction, every LLM call with its token usage (the full
-prompts are at DEBUG level), and the final verdict. If a
-run crashes, the traceback is in the log too. Use `--log-dir <dir>` to write
+agent decision, every tool call with its payload, result and raw output, each
+rule finding, the ML prediction, the LLM calls and their token usage, and the
+final verdict. If a run crashes, the traceback is in the log too. Use `--log-dir <dir>` to write
 logs somewhere else.
 
 The first run trains the ML model (about a second) and saves it to
@@ -221,10 +216,8 @@ python3 -m analyzer.run "My BGP peer is stuck at active state" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-The agent calls `bgp_state` and sees `Idle (Admin)`, not the `Active` the
-question claims. The rule book's hint says that means the neighbor is shut
-down on this router, so it can conclude `neighbor_shutdown` after one tool
-call (sometimes it checks `config` first to confirm).
+The agent sees `Idle (Admin)` (not `Active` as the question says) and
+concludes `neighbor_shutdown`, sometimes after checking `config`.
 
 With `--mode rules` it walks the whole chain (`bgp_state → interface → tcp_port → config`). None
 of the rules fire: the interfaces are up, port 179 is reachable, and there's
@@ -266,11 +259,9 @@ python3 -m analyzer.run "My BGP peer won't come up" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-The agent sees `Idle` with no reason (so not shut down), usually checks
-interfaces and port 179, then reads the config: `neighbor 172.20.20.3
-remote-as 65009`. It should conclude `remote_as_mismatch`. The tools only see
-router1, so the peer's real AS (65002) isn't in the evidence: check the
-suggested fix's AS number against router2 before applying it.
+The agent sees `Idle`, checks the config (`remote-as 65009`) and should
+conclude `remote_as_mismatch`. The tools only see router1, so double-check the
+AS in the suggested fix against router2 (65002).
 
 With `--mode rules`: when the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
 case goes to the LLM. Expect `Decided by: llm` with its root cause and fix,
@@ -322,30 +313,15 @@ It prints per-class precision/recall on a held-out split, then saves the model.
 
 ## Running the tests
 
-The tests need no lab, API server or Ollama. They replay real FRR output
-through the real REST API in-process, with SSH and the LLM faked. Run them
-from the repo root, in the VM or anywhere with `requirements.txt` installed:
+No lab, API server or Ollama needed; SSH and the LLM are faked. From the repo root:
 
 ```bash
 python3 -m pytest
 ```
 
-- `tests/test_tools.py`: each tool's parser on real `vtysh` output
-- `tests/test_rules_db.py`: the seed, schema versioning, the escalation chain
-- `tests/test_llm_client.py`: the Ollama and Claude backends with the network mocked
-- `tests/test_analyzer.py`: the whole rules → ML → LLM pipeline for each fault
-  scenario from Steps 8–11, plus interface down and TCP blocked
-- `tests/test_agent.py`: the LLM agent loop with scripted LLM decisions:
-  guardrails, rule findings, the step budget, falling back to rules, the CLI
-- `tests/test_rules_engine.py`, `tests/test_tool_registry.py`: rule findings
-  and hints; tool catalog, argument checks and tool calls
-
-These check the agent's mechanics, not how well a real model chooses. To see
+Device output for each scenario is in `tests/scenarios.py`. The agent tests
+script the LLM's decisions, so they check the loop, not a real model; for
 that, run Steps 8–10 against the lab.
-
-The scenarios' device output lives in `tests/scenarios.py`. The tests train
-their own ML model in a temp dir and use a temp Rules DB, so they never touch
-`analyzer/models/` or `rules_db/rules.db`.
 
 ---
 

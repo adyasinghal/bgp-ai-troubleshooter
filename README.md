@@ -27,7 +27,7 @@ bgp-ai-troubleshooter/
 │   ├── prompts.py                (agent prompt and decision schemas)  
 │   ├── llm_client.py             (one entry point for LLM calls: Ollama or Claude)  
 │   ├── rest_client.py            (calls API over HTTP)  
-│   ├── triage.py                 (question → starting intent)  
+│   ├── triage.py                 (reads the question: LLM, or keywords in rules mode)  
 │   ├── rules_engine.py           (the reasoning loop)  
 │   ├── tool_registry.py          (tool catalog: validates and runs tool calls)  
 │   ├── verdict.py                (builds root_cause/fix output)  

@@ -1,6 +1,4 @@
-"""The current Analyze pipeline (rules -> ML -> LLM) end to end, through the
-real REST API with the lab and the LLM faked. These pin today's behavior so the
-LLM-first rework can be compared against it."""
+"""Rules mode (rules -> ML -> LLM) end to end for each scenario."""
 import json
 
 from analyzer.llm_client import LLMUnavailable
@@ -70,7 +68,6 @@ def test_remote_as_mismatch_goes_to_llm(lab, scripted_llm):
     assert v.notes == ["Diagnosed by scripted-llm"]
     assert v.ml_prediction["label"] != "remote_as_mismatch" or v.ml_prediction["confidence"] < 0.7
 
-    # The LLM saw the question, the tool order and the raw config.
     (call,) = llm.calls
     assert "won't come up" in call["user"]
     case = json.loads(call["user"].split("\n\n", 1)[1])
@@ -86,7 +83,6 @@ def test_llm_unavailable_leaves_case_unresolved(lab, scripted_llm):
 
 
 def test_no_llm_flag_skips_llm(lab):
-    # no_real_llm (conftest) fails the test if the LLM is called.
     v = diagnose(lab("remote_as_mismatch"), QUESTION, HOST, PEER, use_ml=False, use_llm=False)
     assert v.resolved is False
     assert v.notes == []

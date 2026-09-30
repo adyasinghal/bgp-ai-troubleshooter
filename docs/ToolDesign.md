@@ -11,14 +11,15 @@ Input  >>  My BGP peer is stuck at active state, tell me why
 
 ## LLM agent flow (default: `--mode agent`)
 
-The LLM is involved from the first step: it decides which tool to run, reads
-each result, and decides what to check next or concludes.
+The LLM decides which tool to run, reads each result, and decides what to
+check next or concludes.
 
 ```
 Input (user question + host + peer)
    |
    v
-[Triage]   suggest a starting intent                               (analyzer/triage.py)
+[Triage]   LLM reads the question: symptom, claimed state,         (analyzer/triage.py)
+           suspects, planned checks; off-topic -> stop
    |
    v
 [Decide]   LLM reads: question, tool catalog + rule book, all steps  (analyzer/agent.py,
@@ -43,15 +44,12 @@ Input (user question + host + peer)
            trace, whether the rules agree, ML second opinion    (analyzer/verdict.py)
 ```
 
-- **The LLM decides, the code enforces.** Only catalogued tools run, args are
-  validated, host/peer always come from the CLI, repeats are refused, the LLM
-  must call at least one tool before concluding, and the step budget is fixed.
-- **Rule findings are facts, not orders.** A decided finding tells the LLM to
-  conclude; the verdict records whether the LLM's fault class agrees with it.
-- **No LLM, no problem.** If the LLM can't be reached or gives an unusable
-  answer, the run falls back to the rule chain below and says so in a note.
-- `--trust-rules` stops at the first decided rule finding; `--no-ml` removes
-  the `ml_classify` tool and the ML second opinion.
+- Guardrails are in code: catalogued tools only, validated args, host/peer
+  from the CLI, bgp_state first, no repeats, a step budget.
+- The verdict notes whether the LLM's fault class agrees with the rules.
+- If the LLM is down or its answer is unusable, the run falls back to the
+  rule chain below.
+- `--trust-rules` stops at the first rule decision; `--no-ml` drops ML.
 
 ## Rule chain flow (`--mode rules`, and the agent's fallback)
 

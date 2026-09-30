@@ -1,13 +1,6 @@
-"""LLM agent: the LLM drives the investigation from the first step.
-
-    triage -> [LLM decides -> guardrails -> tool -> rule finding] x N -> LLM concludes -> Verdict
-
-The LLM picks each tool from the Rules DB catalog and reads every result
-together with the rule book's deterministic finding for it (rules_engine.evaluate).
-Code, not the prompt, enforces the limits: only catalogued tools, validated
-args, no repeated calls, bgp_state before other tools, at least one tool
-before concluding, and a step budget. If the LLM can't be reached or gives an unusable answer, the run falls
-back to the rule chain (rules_engine.diagnose).
+"""LLM agent: the LLM picks each tool, reads the result and rule finding,
+and decides what to check next or concludes. Falls back to the rule chain
+if the LLM is unavailable.
 """
 import json
 import logging
@@ -15,17 +8,15 @@ import logging
 from analyzer import llm_client, ml_engine, prompts, rules_engine
 from analyzer.llm_client import LLMUnavailable
 from analyzer.tool_registry import ToolCallError, ToolRegistry
-from analyzer.triage import triage
+from analyzer.triage import llm_triage
 from analyzer.verdict import Verdict
 
 DEFAULT_MAX_STEPS = 6
-RAW_OUTPUT_LIMIT = 2500   # chars of raw CLI output the LLM sees per tool call
-# Any other tool before this one is refused: the operator's description of the
-# state can be wrong, and a small model otherwise acts on it without checking.
+RAW_OUTPUT_LIMIT = 2500
 FIRST_TOOL = "bgp_state"
+MAX_REJECTS = 2   # in a row, then the LLM must conclude
 
-# A decided rule finding agrees with these LLM fault classes. config_drift is
-# generic, so naming the specific config fault behind the diff also agrees.
+# config_drift is generic, so the specific config faults count as agreeing
 AGREES_WITH = {
     "config_drift": {"config_drift", "remote_as_mismatch", "neighbor_shutdown", "neighbor_missing"},
 }
@@ -36,7 +27,6 @@ log = logging.getLogger(__name__)
 def investigate(client, question: str, host: str, peer: str | None,
                 max_steps: int = DEFAULT_MAX_STEPS, use_ml: bool = True,
                 trust_rules: bool = False) -> Verdict:
-    """Run the LLM-driven investigation; fall back to the rule chain without an LLM."""
     registry = ToolRegistry.load(client)
     if not use_ml:
         registry.remove("ml_classify")
@@ -63,17 +53,21 @@ class Investigation:
         self.use_ml = use_ml
         self.trust_rules = trust_rules
         self.model = None
-        # Stand-in until the LLM triage (Phase 2): keyword match -> suggested first intent.
-        self.triage = {"method": "keyword", "suggested_first_intent": triage(question)}
-        self.steps: list[dict] = []      # every step, including rejected ones
-        self.evidence: list[dict] = []   # tool outputs, same shape as the rule chain's
+        self.triage: dict | None = None
+        self.steps: list[dict] = []
+        self.evidence: list[dict] = []
         self.checked: list[str] = []
-        self.findings: list[dict] = []   # rule findings, one per tool call
-        self.calls: dict[tuple, int] = {}   # (tool_id, args[, evidence count]) -> step n
+        self.findings: list[dict] = []
+        self.calls: dict[tuple, int] = {}
 
     def run(self) -> Verdict:
-        log.info("Agent start: host=%s peer=%s max_steps=%d triage=%s",
-                 self.ctx["host"], self.ctx["peer"], self.max_steps, self.triage)
+        log.info("Agent start: host=%s peer=%s max_steps=%d",
+                 self.ctx["host"], self.ctx["peer"], self.max_steps)
+        self.triage = llm_triage(self.question, self.ctx["host"], self.ctx["peer"], self.registry)
+        if not self.triage["in_scope"]:
+            return Verdict(False, "This doesn't look like a question about this router's BGP sessions.",
+                           "Ask about a BGP session, its peer, or the links and config behind it.",
+                           source="agent", triage=self.triage)
         for n in range(1, self.max_steps + 1):
             decision = self._decide(steps_left=self.max_steps - n + 1)
             action = decision.get("action")
@@ -88,10 +82,11 @@ class Investigation:
                     return self._rules_verdict(finding)
             else:
                 self._reject(n, decision, f"action must be call_tool or conclude, not {action!r}")
-        log.info("Agent used all %d steps; asking for a conclusion", self.max_steps)
+            recent = self.steps[-MAX_REJECTS:]
+            if self.evidence and len(recent) == MAX_REJECTS and all("rejected" in r for r in recent):
+                log.info("%d rejected steps in a row; asking for a conclusion", MAX_REJECTS)
+                break
         return self._verdict(self._decide(steps_left=0))
-
-    # --- talking to the LLM ---
 
     def _decide(self, steps_left: int) -> dict:
         schema = (prompts.step_schema(self.registry.all_args()) if steps_left
@@ -115,22 +110,19 @@ class Investigation:
             "steps": [_step_for_prompt(s) for s in self.steps],
         }
 
-    # --- one step ---
-
     def _call(self, n: int, decision: dict) -> dict | None:
         tool_id = decision.get("tool_id") or ""
         try:
             args = self.registry.validate(tool_id, decision.get("args"))
             key = (tool_id, json.dumps(args, sort_keys=True))
             if self.registry.tools[tool_id]["kind"] == "internal":
-                key += (len(self._device_evidence()),)   # new device output -> a new answer
+                key += (len(self._device_evidence()),)
             if key in self.calls:
                 raise ToolCallError(f"{tool_id} was already called with these args in step "
                                     f"{self.calls[key]}; use that result")
             if (tool_id != FIRST_TOOL and FIRST_TOOL in self.registry.tools
                     and FIRST_TOOL not in self.checked):
-                raise ToolCallError(f"call {FIRST_TOOL} first: the session's actual state decides "
-                                    f"which checks make sense")
+                raise ToolCallError(f"call {FIRST_TOOL} first")
         except ToolCallError as e:
             self._reject(n, decision, str(e))
             return None
@@ -139,11 +131,9 @@ class Investigation:
         result = self.registry.execute(self.client, tool_id, args, self.ctx, self.evidence)
         finding = rules_engine.evaluate(tool_id, result, self.ctx)
         if finding["decision"] == "continue":
-            # next_intent_on_fail only applies while the case is unresolved
             finding["suggested_next_intent"] = self.registry.next_intent_after(tool_id)
         else:
-            finding["note"] = ("The rule book considers the case decided by this result. "
-                               "Conclude now unless other evidence already contradicts it.")
+            finding["note"] = "The rule book considers this decided. Conclude unless other evidence contradicts it."
         summary = summarize(tool_id, result)
         if finding["decision"] != "continue":
             summary += f" [rule: {finding['decision']}]"
@@ -175,8 +165,6 @@ class Investigation:
             return f"a conclusion needs a complete diagnosis (missing {', '.join(missing)})"
         return None
 
-    # --- verdicts ---
-
     def _verdict(self, decision: dict) -> Verdict:
         missing = _missing_diagnosis_fields(decision)
         if missing:
@@ -186,7 +174,7 @@ class Investigation:
         resolved = bool(d["resolved"])
         if not self.evidence:
             resolved = False
-            notes.append("Every tool call was rejected, so the conclusion has no evidence behind it")
+            notes.append("No tool ran, so the conclusion has no evidence")
 
         decided = [f for f in self.findings if f["decision"] != "continue"]
         rules_agree = (any(d["fault_class"] in AGREES_WITH.get(f["fault_class"], {f["fault_class"]})
@@ -216,7 +204,6 @@ class Investigation:
                 if self.registry.tools.get(e["tool"], {}).get("kind") == "device"]
 
     def _ml_opinion(self) -> dict | None:
-        """ML second opinion over the device tools' output, shown next to the verdict."""
         device = self._device_evidence()
         if not (self.use_ml and device):
             return None
@@ -238,14 +225,12 @@ def _missing_diagnosis_fields(decision: dict) -> list[str]:
 
 
 def _step_for_prompt(step: dict) -> dict:
-    """What the LLM sees of a step: parsed output, trimmed raw output, the rule finding."""
     if "rejected" in step:
         return {"n": step["n"], "tool": step["tool"], "args": step["args"], "rejected": step["rejected"]}
     r = step["result"]
     parsed = r.get("parsed") or {}
     if step["tool"] == "config" and not parsed.get("has_baseline"):
-        # Without a baseline the diff is the whole config again, marked "+".
-        parsed = {**parsed, "diff": "(no baseline saved, so no diff; the running config is in raw_output)"}
+        parsed = {**parsed, "diff": "(no baseline; see raw_output)"}
     shown = {"success": r.get("success"), "error": r.get("error"), "parsed": parsed}
     if r.get("raw_output"):
         shown["raw_output"] = _trim(r["raw_output"])
@@ -261,7 +246,6 @@ def _trim(text: str) -> str:
 
 
 def summarize(tool_id: str, result: dict) -> str:
-    """One line per tool result, for the step trace and the log."""
     if not result.get("success", True):
         return f"failed: {result.get('error')}"
     p = result.get("parsed") or {}

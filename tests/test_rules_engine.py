@@ -1,5 +1,4 @@
-"""rules_engine.evaluate: the rule book's finding on one tool result, including
-the hints the LLM agent gets (the rule chain ignores them)."""
+"""rules_engine.evaluate: findings and hints."""
 import pytest
 
 from analyzer.rules_engine import evaluate

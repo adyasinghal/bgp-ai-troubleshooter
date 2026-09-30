@@ -1,5 +1,4 @@
-"""Rules DB: the seed is idempotent, an out-of-date DB rebuilds itself, and
-the catalog has what the LLM needs to pick tools."""
+"""Rules DB seeding, schema versioning and the tool catalog."""
 import re
 import sqlite3
 
@@ -68,7 +67,6 @@ def test_reload_seed_does_not_duplicate(tmp_path):
 
 
 def test_old_db_is_rebuilt(tmp_path):
-    """A DB from before schema versioning (user_version 0) with duplicated rules."""
     path = tmp_path / "rules.db"
     db = RulesDB(path)
     db.conn.executescript("""
@@ -87,7 +85,6 @@ def test_old_db_is_rebuilt(tmp_path):
 def test_broken_schema_leaves_db_intact(tmp_path, monkeypatch):
     path = tmp_path / "rules.db"
     RulesDB(path).conn.close()
-    # A newer schema.sql with a bad statement after the DROPs and the seed.
     schema = SCHEMA_PATH.read_text().replace("PRAGMA user_version", "INSERT INTO nope VALUES (1);\nPRAGMA user_version")
     broken = tmp_path / "schema.sql"
     broken.write_text(re.sub(r"user_version = \d+", "user_version = 99", schema))

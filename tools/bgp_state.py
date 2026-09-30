@@ -41,9 +41,7 @@ class BGPStateTool(BaseTool):
         #      0     1  2    3       4      5     6   7      8          9          10      11
         # Column 9 (State/PfxRcd) carries the state and stays at the same index
         # no matter how many extra columns a given FRR version prints after it.
-        # A state can carry a reason in parentheses: "Idle (Admin)" = neighbor
-        # shut down, "Idle (PfxCt)" = max-prefix hit, "(Policy)" = eBGP up but
-        # no route policy. The reason goes in state_reasons; peers keeps the bare state.
+        # "Idle (Admin)", "Idle (PfxCt)", "(Policy)": the reason goes in state_reasons
         peers, reasons = {}, {}
         ip_re = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
@@ -55,7 +53,7 @@ class BGPStateTool(BaseTool):
 
             neighbor = fields[0]
             state_field = fields[9]          # the State/PfxRcd column
-            after = fields[10] if len(fields) > 10 else ""   # PfxSnt, or the state's "(reason)"
+            after = fields[10] if len(fields) > 10 else ""
 
             if state_field.isdigit() or state_field == "(Policy)":
                 # a number = prefixes received; "(Policy)" = up but policy-filtered
@@ -66,7 +64,7 @@ class BGPStateTool(BaseTool):
                 state = state_field
                 if after.startswith("(") and after.endswith(")"):
                     reasons[neighbor] = after.strip("()")
-            elif state_field.startswith("Idle"):   # e.g. "Idle(Admin)" printed without a space
+            elif state_field.startswith("Idle"):   # e.g. "Idle(Admin)"
                 state = "Idle"
                 reasons[neighbor] = state_field[4:].strip("()") or None
             else:

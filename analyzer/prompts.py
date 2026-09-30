@@ -1,15 +1,7 @@
-"""Prompts and output schemas for the LLM agent (analyzer/agent.py).
-
-Each turn the agent sends the whole case (question, tool catalog, every step
-so far) in one user message and gets back one JSON decision: call a tool, or
-conclude. Keeping turns stateless lets the agent trim old steps to fit a small
-local model's context window.
-"""
+"""Prompts and output schemas for the LLM agent."""
 import json
 
-# What the LLM may name as fault_class: the ML engine's labels (so the answer
-# can be compared with ML and the rules), minus its "unknown" catch-all, plus
-# "other". tests/test_agent.py checks the labels still match ml_engine.FAULTS.
+# ml_engine.FAULTS labels, so answers can be compared with ML and the rules
 FAULT_CLASSES = {
     "healthy": "the session is up; nothing to fix",
     "interface_down": "an interface on the path to the peer is down",
@@ -22,10 +14,24 @@ FAULT_CLASSES = {
     "other": "a cause not listed here (MD5, router-id, multihop/TTL, update-source, a fault on the peer...)",
 }
 
-SYSTEM_PROMPT = """You are a senior network engineer troubleshooting BGP on FRRouting (FRR) routers in a Containerlab lab. You investigate one router (the host) and one of its BGP peers by calling diagnostic tools one at a time, then you conclude.
+STATES = ["Established", "Active", "Connect", "Idle", "OpenSent", "OpenConfirm", "none"]
+
+TRIAGE_PROMPT = """You are a senior network engineer. Before any diagnostic tool runs, read an operator's question about BGP on an FRR router and plan the investigation.
+
+- in_scope: false only if the question is not about this router's BGP sessions, its links or its config.
+- symptom: one sentence restating the problem.
+- claimed_state: the BGP state the operator reports, or "none". It is only a claim until a tool checks it.
+- interface: an interface named in the question, or "".
+- hypotheses: up to 4 likely fault classes, most likely first, each with a short reason.
+- plan: the rule intents you expect to need, in order. bgp_state_check always comes first.
+
+Reply with only a JSON object."""
+
+SYSTEM_PROMPT ="""You are a senior network engineer troubleshooting BGP on FRRouting (FRR) routers in a Containerlab lab. You investigate one router (the host) and one of its BGP peers by calling diagnostic tools one at a time, then you conclude.
 
 How to work:
 - Each turn, read the operator's question, the tool catalog and every step so far, then either call ONE tool or conclude.
+- triage is your reading of the question before any evidence: a starting point, not a finding.
 - Your first tool call is bgp_state, to see the session's actual state. The operator's description can be wrong (for example they say Active but the peer is Idle), so don't act on it before checking.
 - Choose the tool that best tells your remaining hypotheses apart. Each rule's symptoms and each tool's when_to_use say what fits; a rule's next_intent_on_fail is a sensible default, not an order.
 - Every tool result comes with a rule_finding from a deterministic rule book. A "root_cause" or "healthy" finding is a verified fact: conclude with it unless other evidence clearly shows it is misleading, and then say why in your thought.
@@ -52,6 +58,33 @@ Reply with only a JSON object:
 - diagnosis: only when action is "conclude"."""
 
 
+def triage_schema(intents: list[str]) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "in_scope": {"type": "boolean"},
+            "symptom": {"type": "string"},
+            "claimed_state": {"type": "string", "enum": STATES},
+            "interface": {"type": "string"},
+            "hypotheses": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "fault_class": {"type": "string", "enum": list(FAULT_CLASSES)},
+                        "why": {"type": "string"},
+                    },
+                    "required": ["fault_class", "why"],
+                    "additionalProperties": False,
+                },
+            },
+            "plan": {"type": "array", "items": {"type": "string", "enum": intents}},
+        },
+        "required": ["in_scope", "symptom", "claimed_state", "interface", "hypotheses", "plan"],
+        "additionalProperties": False,
+    }
+
+
 def diagnosis_schema() -> dict:
     return {
         "type": "object",
@@ -69,8 +102,6 @@ def diagnosis_schema() -> dict:
 
 
 def step_schema(tool_args: dict) -> dict:
-    """Schema for one decision. `tool_args` is the union of every tool's
-    args_schema, so the args object can be constrained without per-tool branches."""
     return {
         "type": "object",
         "properties": {
@@ -91,7 +122,6 @@ def step_schema(tool_args: dict) -> dict:
 
 
 def conclude_schema() -> dict:
-    """Schema for the final turn once the step budget is spent: conclude only."""
     return {
         "type": "object",
         "properties": {

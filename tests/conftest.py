@@ -1,5 +1,4 @@
-"""Shared fixtures. No test touches the lab, Ollama, the Anthropic API, or the
-repo's own rules.db / trained ML model."""
+"""Fixtures. Tests never touch the lab, a real LLM, or the repo's rules.db / ML model."""
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,8 +12,7 @@ from tests.scenarios import HOST, SCENARIOS
 
 @pytest.fixture(scope="session", autouse=True)
 def ml_model(tmp_path_factory):
-    """Train the ML model once per test run into a temp dir (about a second),
-    so tests never read or overwrite analyzer/models/."""
+    """Train the ML model once, into a temp dir."""
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(ml_engine, "MODEL_PATH", tmp_path_factory.mktemp("models") / "model.joblib")
         mp.setattr(ml_engine, "_model", None)
@@ -23,7 +21,7 @@ def ml_model(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def no_real_llm(monkeypatch):
-    """Fail loudly if a test reaches the LLM without scripting its answers."""
+    """Fail if a test reaches the LLM without scripted_llm."""
     def refuse(*args, **kwargs):
         raise AssertionError("unexpected LLM call; use the scripted_llm fixture")
     monkeypatch.setattr(llm_client, "chat_json", refuse)
@@ -41,7 +39,7 @@ def scripted_llm(monkeypatch):
 
 @pytest.fixture
 def lab(monkeypatch, tmp_path):
-    """lab("neighbor_shutdown") returns a LabClient whose tools see that scenario."""
+    """lab("neighbor_shutdown") -> LabClient for that scenario."""
     monkeypatch.setattr(api, "rules_db", RulesDB(tmp_path / "rules.db"))
     monkeypatch.setattr(tools.config, "BASELINE_DIR", tmp_path / "baselines")
     (tmp_path / "baselines").mkdir()

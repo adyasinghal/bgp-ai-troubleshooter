@@ -33,7 +33,7 @@ class ConfigTool(BaseTool):
         parsed = {
             "has_baseline": bool(baseline),
             "diff": diff_lines,
-            # Without a baseline every line counts as "added", so drift is unknown, not True.
+            # no baseline -> unknown
             "drifted": len(diff_lines) > 0 if baseline else None,
         }
         return self._wrap(host, result, parsed)

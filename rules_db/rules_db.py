@@ -6,10 +6,6 @@ of the "loops until resolved" cycle: given the current intent, it returns the
 ordered list of tools to try, plus what intent to escalate to if a tool's
 result doesn't resolve the case (see `next_intent_on_fail` chaining in the
 rule book, e.g. bgp_state_check -> interface_check -> tcp_port_check -> config_check).
-
-Each tool also records how to call it (`args_schema`, `context_args`) and when
-it helps (`when_to_use`), and each rule the symptoms it fits, so the LLM can
-pick tools from this catalog instead of walking the chain in a fixed order.
 """
 
 import json
@@ -35,10 +31,10 @@ class ToolSpec:
     description: str
     endpoint: Optional[str]        # None for internal tools
     base_command: str
-    kind: str = "device"           # "device" (REST -> router) | "internal" (runs in the analyzer)
+    kind: str = "device"           # or "internal"
     when_to_use: str = ""
-    args_schema: dict = field(default_factory=dict)    # args the LLM may set
-    context_args: dict = field(default_factory=dict)   # payload field -> run context key
+    args_schema: dict = field(default_factory=dict)
+    context_args: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -71,8 +67,7 @@ class RulesDB:
         wanted = _schema_version(schema)
         current = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if current != wanted:
-            # A new DB reports version 0. An old one is rebuilt from the seed,
-            # which drops rules added at runtime with add_rule/upsert_tool.
+            # note: drops rules added at runtime with add_rule/upsert_tool
             log.info("Rules DB %s is at schema version %s, schema.sql is %s; rebuilding from seed",
                      self.db_path, current, wanted)
             self._apply(schema)
@@ -82,8 +77,6 @@ class RulesDB:
         self._apply(SCHEMA_PATH.read_text())
 
     def _apply(self, schema: str):
-        # One transaction, so a mistake in schema.sql leaves the old DB intact
-        # instead of dropped tables and a half-applied seed.
         try:
             self.conn.executescript(f"BEGIN;\n{schema}\nCOMMIT;")
         except sqlite3.Error:

@@ -1,7 +1,4 @@
-"""The LLM agent loop, with the lab faked and the LLM's decisions scripted.
-
-These test the loop's mechanics (guardrails, rule findings, budget, fallback,
-verdict), not the quality of a real model's choices."""
+"""Agent loop with scripted LLM decisions."""
 import json
 
 import pytest
@@ -11,14 +8,13 @@ from analyzer.agent import investigate
 from analyzer.llm_client import LLMUnavailable
 from analyzer.ml_engine import FAULTS
 from analyzer.run import main
-from tests.fakes import call, conclude
+from tests.fakes import call, conclude, triage_answer
 from tests.scenarios import HOST, PEER
 
 QUESTION = "My BGP peer is stuck at active state"
 
 
 def case_of(llm_call: dict) -> dict:
-    """The case JSON the agent sent in one LLM call."""
     return json.loads(llm_call["user"].split("\n\n", 1)[1].rsplit("\n\n", 1)[0])
 
 
@@ -28,7 +24,6 @@ def test_fault_classes_match_ml_labels():
 
 
 def test_neighbor_shutdown_in_two_tool_calls(lab, scripted_llm):
-    """The walk-through from the plan: bgp_state shows Idle (Admin), config confirms."""
     llm = scripted_llm(
         call("bgp_state", "bgp_state_check"),
         call("config", "config_check", thought="Idle (Admin) means shut down; confirm in config"),
@@ -38,12 +33,12 @@ def test_neighbor_shutdown_in_two_tool_calls(lab, scripted_llm):
 
     assert (v.resolved, v.source, v.fault_class, v.confidence) == (True, "agent", "neighbor_shutdown", "high")
     assert v.checked == ["bgp_state", "config"]
-    assert v.rules_agree is None                    # no rule reached a decision
+    assert v.rules_agree is None
     assert v.ml_prediction["label"] == "neighbor_shutdown"
     assert v.notes == ["Diagnosed by scripted-llm"]
     assert [s["summary"] for s in v.steps] == ["peer Idle (Admin)", "running config read (no baseline)"]
     assert v.steps[1]["thought"] == "Idle (Admin) means shut down; confirm in config"
-    assert v.triage == {"method": "keyword", "suggested_first_intent": "bgp_state_check"}
+    assert (v.triage["method"], v.triage["plan"]) == ("llm", ["bgp_state_check"])
 
     first, second, third = (case_of(c) for c in llm.calls)
     assert first["steps"] == [] and first["question"] == QUESTION
@@ -53,10 +48,47 @@ def test_neighbor_shutdown_in_two_tool_calls(lab, scripted_llm):
     assert step1["rule_finding"]["decision"] == "continue"
     assert step1["rule_finding"]["suggested_next_intent"] == "interface_check"
     assert step1["rule_finding"]["hint"].startswith("Idle (Admin): the neighbor is administratively shut down")
-    # config without a baseline: the redundant diff is dropped, the running config stays
     step2 = third["steps"][1]["result"]
     assert "no baseline" in step2["parsed"]["diff"]
     assert "neighbor 172.20.20.3 shutdown" in step2["raw_output"]
+
+
+def test_triage_reaches_the_agent(lab, scripted_llm):
+    triage = triage_answer(claimed_state="Active", hypotheses=["interface_down", "tcp_unreachable"],
+                           plan=["bgp_state_check", "interface_check"])
+    llm = scripted_llm(call("bgp_state"), conclude("neighbor_shutdown"), triage=triage)
+    v = investigate(lab("neighbor_shutdown"), QUESTION, HOST, PEER)
+
+    (t,) = llm.triage_calls
+    assert QUESTION in t["user"] and "interface_check" in t["user"]
+    assert t["schema"]["properties"]["plan"]["items"]["enum"] == [
+        "bgp_state_check", "config_check", "interface_check", "tcp_port_check"]
+    assert case_of(llm.calls[0])["triage"]["claimed_state"] == "Active"
+    assert v.triage["hypotheses"][0]["fault_class"] == "interface_down"
+    assert "Triage:        peer is down (suspects: interface_down, tcp_unreachable)" in v.pretty()
+
+
+def test_triage_drops_unknown_intents_and_classes(lab, scripted_llm):
+    triage = triage_answer(hypotheses=["made_up", "healthy"], plan=["reboot_check"])
+    scripted_llm(call("bgp_state"), conclude("healthy"), triage=triage)
+    v = investigate(lab("healthy"), "Is my link to router2 up?", HOST, PEER)
+    assert v.triage["plan"] == ["interface_check"]      # keyword fallback
+    assert [h["fault_class"] for h in v.triage["hypotheses"]] == ["healthy"]
+
+
+def test_out_of_scope_question_runs_no_tools(lab, scripted_llm):
+    client = lab("healthy")
+    llm = scripted_llm(triage=triage_answer(in_scope=False))
+    v = investigate(client, "What's the weather in Bangalore?", HOST, PEER)
+    assert (v.resolved, v.source, v.checked) == (False, "agent", [])
+    assert client.device.commands == [] and llm.calls == []
+
+
+def test_llm_down_at_triage_falls_back_to_rules(lab, scripted_llm):
+    scripted_llm(triage=LLMUnavailable("could not reach Ollama"))
+    v = investigate(lab("interface_down"), QUESTION, HOST, PEER)
+    assert v.source == "rules"
+    assert v.notes == ["LLM agent unavailable (could not reach Ollama); fell back to the rule chain"]
 
 
 def test_rule_finding_shown_and_agreement(lab, scripted_llm):
@@ -67,8 +99,7 @@ def test_rule_finding_shown_and_agreement(lab, scripted_llm):
     v = investigate(lab("interface_down"), QUESTION, HOST, PEER)
     finding = case_of(llm.calls[2])["steps"][1]["rule_finding"]
     assert (finding["decision"], finding["fault_class"]) == ("root_cause", "interface_down")
-    # a decided finding tells the LLM to conclude instead of pointing down the chain
-    assert "suggested_next_intent" not in finding and "Conclude now" in finding["note"]
+    assert "suggested_next_intent" not in finding and "Conclude" in finding["note"]
     assert v.rules_agree is True
     assert v.steps[1]["summary"] == "down: eth1 [rule: root_cause]"
     assert "Rules agree:   yes" in v.pretty()
@@ -123,7 +154,7 @@ def test_bad_decisions_are_rejected_and_fed_back(lab, scripted_llm, bad_decision
 
     assert reason in v.steps[0]["rejected"]
     assert case_of(llm.calls[1])["steps"][0]["rejected"] == v.steps[0]["rejected"]
-    assert client.device.commands == [(HOST, "show bgp summary")]   # nothing ran for the bad step
+    assert client.device.commands == [(HOST, "show bgp summary")]
     assert v.resolved and v.checked == ["bgp_state"]
     assert "rejected" in v.pretty()
 
@@ -144,6 +175,15 @@ def test_repeated_call_is_rejected(lab, scripted_llm):
     assert len(client.device.commands) == 1
 
 
+def test_repeated_rejections_force_a_conclusion(lab, scripted_llm):
+    llm = scripted_llm(call("bgp_state"), call("config"), call("config"), call("config"),
+                       conclude("remote_as_mismatch"))
+    v = investigate(lab("remote_as_mismatch"), QUESTION, HOST, PEER)
+    assert [s.get("rejected", "ok")[:14] for s in v.steps] == ["ok", "ok", "config was alr", "config was alr"]
+    assert llm.calls[-1]["schema"]["properties"]["action"]["enum"] == ["conclude"]
+    assert v.fault_class == "remote_as_mismatch"
+
+
 def test_conclusion_without_full_diagnosis_is_rejected(lab, scripted_llm):
     incomplete = {"thought": "done", "action": "conclude", "diagnosis": {"resolved": True}}
     scripted_llm(call("bgp_state"), incomplete, conclude("healthy"))
@@ -157,9 +197,9 @@ def test_ml_classify_as_a_step(lab, scripted_llm):
                  conclude("neighbor_shutdown"))
     v = investigate(lab("neighbor_shutdown"), QUESTION, HOST, PEER)
     assert v.steps[2]["summary"].startswith("neighbor_shutdown (")
-    assert "already called" in v.steps[3]["rejected"]   # no new evidence since step 3
+    assert "already called" in v.steps[3]["rejected"]
     assert v.checked == ["bgp_state", "config", "ml_classify"]
-    assert v.ml_prediction["label"] == "neighbor_shutdown"   # second opinion ignores the ML step itself
+    assert v.ml_prediction["label"] == "neighbor_shutdown"
 
 
 def test_no_ml_hides_ml_classify(lab, scripted_llm):
@@ -199,8 +239,6 @@ def test_all_tools_failing_is_evidence(lab, scripted_llm):
     assert (v.resolved, v.fault_class) == (True, "device_unreachable")
 
 
-# --- falling back to the rule chain ---
-
 def test_llm_down_at_start_falls_back_to_rules(lab, scripted_llm):
     scripted_llm(LLMUnavailable("could not reach Ollama"))
     v = investigate(lab("interface_down"), QUESTION, HOST, PEER)
@@ -222,8 +260,6 @@ def test_unusable_forced_conclusion_falls_back(lab, scripted_llm):
     assert v.source == "rules"
     assert "conclusion is missing" in v.notes[-1]
 
-
-# --- CLI ---
 
 def run_cli(monkeypatch, tmp_path, *flags):
     seen = {}
