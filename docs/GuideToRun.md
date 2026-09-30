@@ -3,11 +3,18 @@
 This guide takes you from a fresh machine to running the full workflow:
 lab → REST tools → Analyze stage.
 
-The Analyze stage escalates in this order, stopping as soon as one step finds a root cause:
+The Analyze stage has two modes:
 
-```
-rule chain → ML engine (scikit-learn) → LLM (local model via Ollama) → human
-```
+- **agent** (default): the LLM reads the question, picks each tool from the
+  Rules DB catalog, reads each result together with the rule book's finding
+  for it, and decides what to check next or concludes. If the LLM can't be
+  reached, the run falls back to rules mode automatically.
+- **rules** (`--mode rules`): the fixed chain, escalating in this order and
+  stopping as soon as one step finds a root cause:
+
+  ```
+  rule chain → ML engine (scikit-learn) → LLM (local model via Ollama) → human
+  ```
 
 Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM. The one exception is Ollama, which runs on the Mac (see Step 7).
 
@@ -16,7 +23,7 @@ Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the 
 - OrbStack installed, with an Ubuntu VM named `clab` (see `InitialSetup.md`).
 - Docker + Containerlab installed inside that VM.
 - Python 3 + pip inside the VM.
-- *(Optional)* Ollama on the Mac, for the LLM escalation step (free, runs locally; Step 7). Without it everything else still works and the verdict says the LLM step was skipped.
+- Ollama on the Mac, for the LLM (free, runs locally; Step 7). Without it the analyzer still works: agent mode falls back to the rule chain and the verdict says so.
 
 ## Layout
 
@@ -102,9 +109,9 @@ curl -X POST http://localhost:8000/tools/bgp/state \
 
 Expect: `{"status":"ok"}`, the rules JSON, then `"success": true` with a populated `parsed.peers`.
 
-## Step 7 — (Optional) Enable LLM escalation with Ollama
+## Step 7 — Set up the LLM with Ollama
 
-The LLM step uses a free local model served by Ollama. Ollama runs **on the Mac, not in the VM**, so it can use the Apple GPU. The analyzer in the VM reaches it at `http://host.orb.internal:11434`, which OrbStack forwards to the Mac's localhost.
+The LLM uses a free local model served by Ollama. Ollama runs **on the Mac, not in the VM**, so it can use the Apple GPU. The analyzer in the VM reaches it at `http://host.orb.internal:11434`, which OrbStack forwards to the Mac's localhost.
 
 **7a. On the Mac (a normal macOS terminal, not `orb -m clab`), once:**
 
@@ -136,7 +143,10 @@ To use Claude instead of the local model, set `BGP_LLM_PROVIDER=anthropic` and
 `ANTHROPIC_API_KEY` (the model defaults to `claude-opus-5-5`; change it with
 `BGP_LLM_MODEL`). All of these settings live in `analyzer/llm_client.py`.
 
-The LLM is only called when both the rules and the ML engine are stuck. It's free, and nothing leaves your machine. Add `--no-llm` to any analyzer run to skip it. 
+It's free, and nothing leaves your machine. In agent mode the LLM is called
+once per step (a few seconds each on a Mac); in rules mode only when both the
+rules and the ML engine are stuck. Add `--no-llm` to any analyzer run to skip
+it entirely (this implies `--mode rules`).
 
 ## Step 8 — Run the Analyze stage (healthy path)
 
@@ -145,8 +155,32 @@ python3 -m analyzer.run "My BGP peer is stuck at active state" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-With BGP up, it should check `bgp_state`, find `Established`, and report
-"no action needed":
+With BGP up, the agent calls `bgp_state`, sees `Established` (the rule book
+agrees), and concludes after one tool call (~20s with qwen2.5:7b):
+
+```
+Resolved:      True
+Root cause:    BGP peer 172.20.20.3 is Established
+Suggested fix: No action needed — the session is up.
+Decided by:    agent (confidence high)
+Tools checked: bgp_state
+Fault class:   healthy
+Rules agree:   yes
+ML opinion:    healthy (1.00)
+Steps:
+  1. bgp_state -> peer Established (Policy) [rule: healthy]
+     why: We need to start by checking the BGP session state ...
+Note:          Diagnosed by qwen2.5:7b
+```
+
+- `Steps` is what the agent did and why; `[rule: ...]` marks a result the rule
+  book decided on its own.
+- `Rules agree` compares the agent's fault class with the rule book's finding.
+  `NO` means the LLM overrode a rule; read its steps before trusting it.
+- `ML opinion` is the ML engine's second opinion on the same evidence.
+- The model's wording and tool order can differ between runs.
+
+To compare with the fixed rule chain, add `--mode rules`:
 
 ```
 Resolved:      True
@@ -157,21 +191,22 @@ Tools checked: bgp_state
 ML opinion:    healthy (1.00)
 ```
 
-`ML opinion` is the ML engine's second opinion; it's shown whenever the rules
-made the decision.
+If Ollama isn't running, agent mode falls back to this rule chain on its own
+and adds `Note: LLM agent unavailable (...); fell back to the rule chain`.
 
 Every run also writes a log file to `logs/run_<date>-<time>.log` (the path is
-printed as the last line, `Log file:`). It records each step in order: the
-starting intent, each rule fetched, every tool call with its payload, result
-and raw output, each rule decision and escalation, the ML prediction with its
-probabilities, the LLM call and its token usage, and the final verdict. If a
+printed as the last line, `Log file:`). It records each step in order: each
+agent decision with its reasoning (or, in rules mode, each rule fetched and
+escalation), every tool call with its payload, result and raw output, each
+rule finding, the ML prediction, every LLM call with its token usage (the full
+prompts are at DEBUG level), and the final verdict. If a
 run crashes, the traceback is in the log too. Use `--log-dir <dir>` to write
 logs somewhere else.
 
 The first run trains the ML model (about a second) and saves it to
 `analyzer/models/`. Later runs reuse it.
 
-## Step 9 — Test the ML engine (inject a fault the rules miss)
+## Step 9 — Inject a fault the rules miss (neighbor shut down)
 
 Shut the neighbor down on router1:
 
@@ -186,7 +221,12 @@ python3 -m analyzer.run "My BGP peer is stuck at active state" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-It walks the whole chain (`bgp_state → interface → tcp_port → config`). None
+The agent calls `bgp_state` and sees `Idle (Admin)`, not the `Active` the
+question claims. The rule book's hint says that means the neighbor is shut
+down on this router, so it can conclude `neighbor_shutdown` after one tool
+call (sometimes it checks `config` first to confirm).
+
+With `--mode rules` it walks the whole chain (`bgp_state → interface → tcp_port → config`). None
 of the rules fire: the interfaces are up, port 179 is reachable, and there's
 no config baseline to diff against. The ML engine then picks up the
 `Idle (Admin)` state and the `neighbor ... shutdown` line in the running
@@ -200,7 +240,7 @@ Decided by:    ml (confidence 1.00)
 Tools checked: bgp_state -> interface -> tcp_port -> config
 ```
 
-Run it with `--no-ml` to compare: the rules alone report
+Run it with `--no-llm --no-ml` to compare: the rules alone report
 "No root cause found by the rule chain."
 
 Undo the fault:
@@ -209,7 +249,7 @@ Undo the fault:
 docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "no neighbor 172.20.20.3 shutdown" -c "end"
 ```
 
-## Step 10 — Test the LLM escalation (inject an ambiguous fault)
+## Step 10 — Inject an ambiguous fault (remote-as mismatch)
 
 Point router1 at the wrong remote AS. The session keeps failing during the
 OPEN exchange, which the ML engine can't pin down confidently without a
@@ -226,7 +266,13 @@ python3 -m analyzer.run "My BGP peer won't come up" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-When the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
+The agent sees `Idle` with no reason (so not shut down), usually checks
+interfaces and port 179, then reads the config: `neighbor 172.20.20.3
+remote-as 65009`. It should conclude `remote_as_mismatch`. The tools only see
+router1, so the peer's real AS (65002) isn't in the evidence: check the
+suggested fix's AS number against router2 before applying it.
+
+With `--mode rules`: when the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
 case goes to the LLM. Expect `Decided by: llm` with its root cause and fix,
 plus a `Next checks:` list of commands to confirm it, and a
 `Diagnosed by qwen2.5:7b` note. If Ollama isn't running you'll see
@@ -289,6 +335,13 @@ python3 -m pytest
 - `tests/test_llm_client.py`: the Ollama and Claude backends with the network mocked
 - `tests/test_analyzer.py`: the whole rules → ML → LLM pipeline for each fault
   scenario from Steps 8–11, plus interface down and TCP blocked
+- `tests/test_agent.py`: the LLM agent loop with scripted LLM decisions:
+  guardrails, rule findings, the step budget, falling back to rules, the CLI
+- `tests/test_rules_engine.py`, `tests/test_tool_registry.py`: rule findings
+  and hints; tool catalog, argument checks and tool calls
+
+These check the agent's mechanics, not how well a real model chooses. To see
+that, run Steps 8–10 against the lab.
 
 The scenarios' device output lives in `tests/scenarios.py`. The tests train
 their own ML model in a temp dir and use a temp Rules DB, so they never touch

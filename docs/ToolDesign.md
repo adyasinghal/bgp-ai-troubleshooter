@@ -1,7 +1,7 @@
 # Tool Design — Auto-Triage Troubleshooter
 
-(Updated from ToolDesign_Meeting5. Same idea, now reflecting the 4 built tools
-and the escalation chain.)
+(Updated from ToolDesign_Meeting5. Same idea, now reflecting the 4 built tools,
+the LLM agent that drives them, and the rule chain it falls back to.)
 
 ## Example
 
@@ -9,7 +9,51 @@ and the escalation chain.)
 Input  >>  My BGP peer is stuck at active state, tell me why
 ```
 
-## Auto-triage flow (with pipeline stages)
+## LLM agent flow (default: `--mode agent`)
+
+The LLM is involved from the first step: it decides which tool to run, reads
+each result, and decides what to check next or concludes.
+
+```
+Input (user question + host + peer)
+   |
+   v
+[Triage]   suggest a starting intent                               (analyzer/triage.py)
+   |
+   v
+[Decide]   LLM reads: question, tool catalog + rule book, all steps  (analyzer/agent.py,
+   |       so far -> call ONE tool, or conclude                      analyzer/prompts.py)
+   |
+   |-- call a tool ---------------------------------------------+
+   |                                                            v
+   |       [Guardrails] tool in the catalog? args valid? not a repeat?  (analyzer/tool_registry.py)
+   |                    rejected -> the reason goes back to the LLM
+   |                                                            v
+   |       [Tool]       Connect + Collect + Parse               (tools/ -> REST API)
+   |                                                            v
+   |       [Rule finding] the rule book's verdict on this result  (rules_engine.evaluate)
+   |                    root_cause / healthy -> "conclude now"
+   |                    continue             -> suggested next intent
+   |                                                            |
+   |<------------------------ loop (at most --max-steps) -------+
+   |
+   |-- conclude (or the step budget is spent)
+   v
+[Verdict]  root cause, fix, fault class, confidence, next checks, the step
+           trace, whether the rules agree, ML second opinion    (analyzer/verdict.py)
+```
+
+- **The LLM decides, the code enforces.** Only catalogued tools run, args are
+  validated, host/peer always come from the CLI, repeats are refused, the LLM
+  must call at least one tool before concluding, and the step budget is fixed.
+- **Rule findings are facts, not orders.** A decided finding tells the LLM to
+  conclude; the verdict records whether the LLM's fault class agrees with it.
+- **No LLM, no problem.** If the LLM can't be reached or gives an unusable
+  answer, the run falls back to the rule chain below and says so in a note.
+- `--trust-rules` stops at the first decided rule finding; `--no-ml` removes
+  the `ml_classify` tool and the ML second opinion.
+
+## Rule chain flow (`--mode rules`, and the agent's fallback)
 
 ```
 Input (user question)
@@ -36,9 +80,9 @@ Input (user question)
              - otherwise -> pass its best guess to the LLM as a hint
    |
    v
-[LLM]      Claude reads question + all tool output + ML guess     (analyzer/llm_escalation.py)
+[LLM]      LLM reads question + all tool output + ML guess        (analyzer/llm_escalation.py)
              - returns root cause, fix, confidence, next checks
-             - no API key / API error -> skip, verdict stays unresolved
+             - LLM unreachable / error -> skip, verdict stays unresolved
    |
    v
 [Verdict]  root cause + suggested fix + who decided               (analyzer/verdict.py)
@@ -79,9 +123,12 @@ LLM             --(if unresolved)--> human, with the LLM's suggested next checks
   Trained on synthetic cases for now; retrain with real labelled cases via
   `python3 -m analyzer.ml_engine train --cases cases.jsonl`.
 - **LLM escalation** (`analyzer/llm_escalation.py`): sends the question, every
-  tool's parsed + raw output, and the ML guess to Claude, which returns a
-  structured root cause, fix, confidence and next checks. Needs
-  `ANTHROPIC_API_KEY`; without it the verdict says the step was skipped.
+  tool's parsed + raw output, and the ML guess to the LLM (local Ollama model by
+  default, or Claude; see `analyzer/llm_client.py`), which returns a structured
+  root cause, fix, confidence and next checks. If the LLM can't be reached, the
+  verdict says the step was skipped.
+- In agent mode the ML engine is also a tool the LLM can call (`ml_classify`),
+  and the rule book is the catalog it chooses from rather than a fixed order.
 
 ## Tools list
 

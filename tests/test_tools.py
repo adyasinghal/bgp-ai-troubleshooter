@@ -69,9 +69,9 @@ def test_tcp_port(scenario, reachable):
 def test_config_without_baseline(monkeypatch, tmp_path):
     monkeypatch.setattr("tools.config.BASELINE_DIR", tmp_path)
     parsed = run(ConfigTool, "remote_as_mismatch").parsed
-    # With no baseline the whole running config counts as drift; the rules ignore it.
+    # With no baseline the diff is the whole config, so drift is unknown.
     assert parsed["has_baseline"] is False
-    assert parsed["drifted"] is True
+    assert parsed["drifted"] is None
 
 
 def test_config_diff_against_baseline(monkeypatch, tmp_path):

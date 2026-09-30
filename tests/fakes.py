@@ -70,6 +70,20 @@ class LabClient:
         return r.json()
 
 
+def call(tool_id: str, intent: str = "", thought: str = "", **args) -> dict:
+    """A scripted agent decision to call a tool."""
+    return {"thought": thought or f"check {tool_id}", "action": "call_tool",
+            "intent": intent, "tool_id": tool_id, "args": args}
+
+
+def conclude(fault_class: str, root_cause: str = "", resolved: bool = True,
+             confidence: str = "high", fix: str = "fix it", next_checks=()) -> dict:
+    """A scripted agent decision to conclude."""
+    return {"thought": "enough evidence", "action": "conclude", "diagnosis": {
+        "resolved": resolved, "root_cause": root_cause or fault_class, "fault_class": fault_class,
+        "suggested_fix": fix, "confidence": confidence, "next_checks": list(next_checks)}}
+
+
 class ScriptedLLM:
     """Replaces llm_client.chat_json. Each call returns the next queued answer;
     a queued Exception is raised instead. Every call is recorded in `calls`."""

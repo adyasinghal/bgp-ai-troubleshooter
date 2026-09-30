@@ -23,6 +23,8 @@ bgp-ai-troubleshooter/
 │   ├── \_\_init\_\_.py  main.py  
 ├── analyzer/                               # ML engine and rule-based diagnostics  
 │   ├── \_\_init\_\_.py  
+│   ├── agent.py                  (LLM agent: picks each tool, reads results, concludes)  
+│   ├── prompts.py                (agent prompt and decision schemas)  
 │   ├── llm_client.py             (one entry point for LLM calls: Ollama or Claude)  
 │   ├── rest_client.py            (calls API over HTTP)  
 │   ├── triage.py                 (question → starting intent)  
@@ -36,6 +38,7 @@ bgp-ai-troubleshooter/
 ├── tests/                                  # python3 -m pytest (no lab or LLM needed)  
 │   ├── \_\_init\_\_.py  conftest.py  fakes.py  scenarios.py  
 │   ├── test_tools.py  test_rules_db.py  test_llm_client.py  test_analyzer.py  
+│   ├── test_rules_engine.py  test_tool_registry.py  test_agent.py  
 ├── pytest.ini  
 ├── .gitignore  
 ├── requirements.txt                        # Python dependencies  

@@ -40,7 +40,19 @@ class ToolRegistry:
         catalog = client.get_catalog()
         return cls(catalog["tools"], catalog["rules"])
 
+    def remove(self, tool_id: str):
+        """Take a tool out of this run's catalog (e.g. ml_classify with --no-ml)."""
+        self.tools.pop(tool_id, None)
+        self.rules = [r for r in self.rules if r["tool_id"] != tool_id]
+
     # --- what the LLM sees ---
+
+    def all_args(self) -> dict:
+        """Every tool's LLM-settable args in one dict (for the decision schema)."""
+        merged = {}
+        for t in self.tools.values():
+            merged.update(t["args_schema"])
+        return merged
 
     def intents(self) -> list[str]:
         return sorted({r["intent"] for r in self.rules})

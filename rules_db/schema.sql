@@ -42,7 +42,8 @@ INSERT INTO tools (tool_id, display_name, description, endpoint, base_command, k
      'Start here for almost any BGP question. Shows every peer''s session state and remote AS as this router sees them. ' ||
      'Established = up ("Policy" reason = eBGP with no route policy, so no prefixes are exchanged). ' ||
      'Active/Connect = the TCP session is not forming: check interfaces, routing and port 179. ' ||
-     'Idle = not trying; reason "Admin" means the neighbor is administratively shut down, no reason often means repeated OPEN failures such as a remote-as mismatch. ' ||
+     'Idle (Admin) = the neighbor is administratively shut down on this router. ' ||
+     'Idle with no reason = NOT shut down: the session keeps failing, usually a rejected OPEN (remote-as mismatch, router-id conflict). ' ||
      'OpenSent/OpenConfirm = TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities, MD5).',
      '{}',
      '{"host": "host", "peer": "peer"}'),
@@ -82,4 +83,4 @@ INSERT INTO rules (rule_id, intent, tool_id, priority, condition, next_intent_on
     (4, 'config_check',    'config',    1, 'TCP reachable but session still down -> diff config for mismatch', NULL,
      'Peer Idle or OpenSent/OpenConfirm, a suspected remote-as mismatch, a shut down or missing neighbor, or a recent config change');
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
