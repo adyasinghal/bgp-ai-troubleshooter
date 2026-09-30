@@ -1,18 +1,18 @@
-"""LLM escalation: hand a case the rules and ML engine couldn't resolve to Claude.
+"""LLM escalation: hand a case the rules and ML engine couldn't resolve to an LLM.
 
-Claude gets the operator's question, every tool's output (parsed fields and
+The LLM gets the operator's question, every tool's output (parsed fields and
 raw CLI text) and the ML engine's best guess, and returns a structured
 diagnosis: root cause, fix, confidence, and the commands to run next.
 
-Needs Anthropic credentials: set ANTHROPIC_API_KEY (or run `ant auth login`).
-Override the model with the BGP_LLM_MODEL environment variable.
+Which model answers (local Ollama or Claude) is set in analyzer/llm_client.py.
 """
 import json
-import os
+import logging
 
-import anthropic
+from analyzer import llm_client
+from analyzer.llm_client import LLMUnavailable   # re-exported for callers
 
-MODEL = os.environ.get("BGP_LLM_MODEL", "claude-opus-5")
+log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a senior network engineer troubleshooting BGP sessions on FRRouting (FRR) routers running in a Containerlab lab.
 
@@ -36,13 +36,9 @@ DIAGNOSIS_SCHEMA = {
 }
 
 
-class LLMUnavailable(Exception):
-    """The LLM could not be reached or declined to answer."""
-
-
 def escalate(question: str, host: str, peer: str | None, checked: list[str],
              evidence: list[dict], ml_prediction: dict | None = None) -> dict:
-    """Ask Claude to diagnose the case. Returns a dict matching DIAGNOSIS_SCHEMA plus 'model'."""
+    """Ask the LLM to diagnose the case. Returns a dict matching DIAGNOSIS_SCHEMA plus 'model'."""
     case = {
         "question": question,
         "host": host,
@@ -51,38 +47,10 @@ def escalate(question: str, host: str, peer: str | None, checked: list[str],
         "ml_prediction": ml_prediction,
         "evidence": evidence,
     }
-    try:
-        client = anthropic.Anthropic()
-        response = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            # If Claude's safety classifiers decline, retry on Anthropic's recommended fallback model.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            system=SYSTEM_PROMPT,
-            output_config={"format": {"type": "json_schema", "schema": DIAGNOSIS_SCHEMA}},
-            messages=[{
-                "role": "user",
-                "content": "Diagnose this case:\n\n" + json.dumps(case, indent=2, sort_keys=True),
-            }],
-        )
-    except anthropic.AuthenticationError as e:
-        raise LLMUnavailable("Anthropic API key was rejected") from e
-    except anthropic.RateLimitError as e:
-        raise LLMUnavailable("Anthropic API rate limit hit; try again shortly") from e
-    except anthropic.APIStatusError as e:
-        raise LLMUnavailable(f"Anthropic API error {e.status_code}: {e.message}") from e
-    except anthropic.APIConnectionError as e:
-        raise LLMUnavailable("could not reach the Anthropic API") from e
-    except TypeError as e:
-        if "authentication" not in str(e):
-            raise
-        raise LLMUnavailable("no Anthropic credentials (set ANTHROPIC_API_KEY)") from e
-
-    if response.stop_reason == "refusal":
-        raise LLMUnavailable("the model declined to answer")
-    if response.stop_reason == "max_tokens":
-        raise LLMUnavailable("the model's answer was cut off")
-
-    text = next(b.text for b in response.content if b.type == "text")
-    return {**json.loads(text), "model": response.model}
+    log.info("Escalating to LLM (%s)", llm_client.describe())
+    diagnosis, model = llm_client.chat_json(
+        SYSTEM_PROMPT,
+        "Diagnose this case:\n\n" + json.dumps(case, indent=2, sort_keys=True),
+        DIAGNOSIS_SCHEMA,
+    )
+    return {**diagnosis, "model": model}

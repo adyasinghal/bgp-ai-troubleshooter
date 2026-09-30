@@ -1,7 +1,7 @@
 # Tool Design — Auto-Triage Troubleshooter
 
-(Updated from ToolDesign_Meeting5. Same idea, now reflecting the 4 built tools
-and the escalation chain.)
+(Updated from ToolDesign_Meeting5: 5 tools now, an LLM agent that drives them,
+and the rule chain it falls back to.)
 
 ## Example
 
@@ -9,7 +9,49 @@ and the escalation chain.)
 Input  >>  My BGP peer is stuck at active state, tell me why
 ```
 
-## Auto-triage flow (with pipeline stages)
+## LLM agent flow (default: `--mode agent`)
+
+The LLM decides which tool to run, reads each result, and decides what to
+check next or concludes.
+
+```
+Input (user question + host + peer)
+   |
+   v
+[Triage]   LLM reads the question: symptom, claimed state,         (analyzer/triage.py)
+           suspects, planned checks; off-topic -> stop
+   |
+   v
+[Decide]   LLM reads: question, tool catalog + rule book, all steps  (analyzer/agent.py,
+   |       so far -> call ONE tool, or conclude                      analyzer/prompts.py)
+   |
+   |-- call a tool ---------------------------------------------+
+   |                                                            v
+   |       [Guardrails] tool in the catalog? args valid? not a repeat?  (analyzer/tool_registry.py)
+   |                    rejected -> the reason goes back to the LLM
+   |                                                            v
+   |       [Tool]       Connect + Collect + Parse               (tools/ -> REST API)
+   |                                                            v
+   |       [Rule finding] the rule book's verdict on this result  (rules_engine.evaluate)
+   |                    root_cause / healthy -> "conclude now"
+   |                    continue             -> suggested next intent
+   |                                                            |
+   |<------------------------ loop (at most --max-steps) -------+
+   |
+   |-- conclude (or the step budget is spent)
+   v
+[Verdict]  root cause, fix, fault class, confidence, next checks, the step
+           trace, whether the rules agree, ML second opinion    (analyzer/verdict.py)
+```
+
+- Guardrails are in code: catalogued tools only, validated args, host/peer
+  from the CLI, bgp_state first, no repeats, a step budget.
+- The verdict notes whether the LLM's fault class agrees with the rules.
+- If the LLM is down or its answer is unusable, the run falls back to the
+  rule chain below.
+- `--trust-rules` stops at the first rule decision; `--no-ml` drops ML.
+
+## Rule chain flow (`--mode rules`, and the agent's fallback)
 
 ```
 Input (user question)
@@ -36,9 +78,9 @@ Input (user question)
              - otherwise -> pass its best guess to the LLM as a hint
    |
    v
-[LLM]      Claude reads question + all tool output + ML guess     (analyzer/llm_escalation.py)
+[LLM]      LLM reads question + all tool output + ML guess        (analyzer/llm_escalation.py)
              - returns root cause, fix, confidence, next checks
-             - no API key / API error -> skip, verdict stays unresolved
+             - LLM unreachable / error -> skip, verdict stays unresolved
    |
    v
 [Verdict]  root cause + suggested fix + who decided               (analyzer/verdict.py)
@@ -48,9 +90,9 @@ Input (user question)
 Output (answer to the user; unresolved -> hand to a human)
 ```
 
-**Analyze is the loop's brain.** The tools only report facts; Analyze interprets them, decides whether a fault is found, and drives the escalation until the case is resolved or the chain ends. Each later stage only runs when the one before it couldn't decide: rules are free and exact, ML is free but probabilistic, and the LLM is the most flexible but costs money per call.
-
-The auto-triage has access to multiple tools and calls them based on the rules in the rule book.
+The tools only report facts; Analyze interprets them. Each later stage only
+runs when the one before it couldn't decide: rules are exact, ML is
+probabilistic, and the LLM is the most flexible but the slowest.
 
 ## Rule book
 
@@ -59,6 +101,7 @@ rule1: BGP state check request        -> call tool1 (bgp_state)
 rule2: Interface check request        -> call tool2 (interface)
 rule3: TCP/port reachability request  -> call tool3 (tcp_port)
 rule4: Config drift check request     -> call tool4 (config)
+rule5: Neighbor detail request        -> call tool5 (bgp_neighbor)   # agent only, not in the chain
 ```
 
 Escalation chain (what to try next if a tool doesn't resolve the case):
@@ -68,7 +111,7 @@ bgp_state_check --(if unresolved)--> interface_check
 interface_check --(if unresolved)--> tcp_port_check
 tcp_port_check  --(if unresolved)--> config_check
 config_check    --(if unresolved)--> ML engine
-ML engine       --(if confidence < 0.7 or "unknown")--> LLM (Claude)
+ML engine       --(if confidence < 0.7 or "unknown")--> LLM
 LLM             --(if unresolved)--> human, with the LLM's suggested next checks
 ```
 
@@ -79,23 +122,29 @@ LLM             --(if unresolved)--> human, with the LLM's suggested next checks
   Trained on synthetic cases for now; retrain with real labelled cases via
   `python3 -m analyzer.ml_engine train --cases cases.jsonl`.
 - **LLM escalation** (`analyzer/llm_escalation.py`): sends the question, every
-  tool's parsed + raw output, and the ML guess to Claude, which returns a
-  structured root cause, fix, confidence and next checks. Needs
-  `ANTHROPIC_API_KEY`; without it the verdict says the step was skipped.
+  tool's parsed + raw output, and the ML guess to the LLM (local Ollama model by
+  default, or Claude; see `analyzer/llm_client.py`), which returns a structured
+  root cause, fix, confidence and next checks. If the LLM can't be reached, the
+  verdict says the step was skipped.
+- In agent mode the ML engine is also a tool the LLM can call (`ml_classify`),
+  and the rule book is the catalog it chooses from rather than a fixed order.
 
 ## Tools list
 
 ```
 tool1 (BGP state)  -> runs "show bgp summary"    -> sends each peer's session state
-tool2 (Interface)  -> runs "show interface detail" -> sends link/admin state per interface
+tool2 (Interface)  -> runs "show interface"      -> sends link/admin state per interface
 tool3 (TCP / port) -> checks TCP port 179 to peer  -> sends transport reachability (up/down)
 tool4 (Config)     -> runs "show running-config"   -> diffs vs baseline, sends drift status
+tool5 (BGP neighbor) -> runs "show bgp neighbors <peer>" -> sends AS, state, shutdown, last reset
+                        and NOTIFICATION; on Bad Peer AS, the AS the peer really uses
 ```
 
 Each tool is reached over REST at:
 
 ```
 POST /tools/bgp/state        {"host": "...", "peer": "..."}
+POST /tools/bgp/neighbor     {"host": "...", "peer": "..."}
 POST /tools/interface/detail {"host": "...", "interface": "..."}   # interface optional
 POST /tools/tcp/check        {"host": "...", "peer_ip": "...", "port": 179}
 POST /tools/config/diff      {"host": "..."}
@@ -107,6 +156,7 @@ And the rule book is queried over REST at:
 GET /rules/{intent}   -> tools to call + next_intent_on_fail
 GET /rules/intents    -> all known intents
 GET /rules/tools      -> all tools in the cohort
+GET /rules/catalog    -> every tool (args, when to use it) and every rule, in one call
 ```
 
 ## Example output

@@ -3,25 +3,26 @@
 This guide takes you from a fresh machine to running the full workflow:
 lab → REST tools → Analyze stage.
 
-The Analyze stage escalates in this order, stopping as soon as one step finds a root cause:
+The Analyze stage has two modes:
 
-```
-rule chain → ML engine (scikit-learn) → LLM (Claude) → human
-```
+- **agent** (default): the LLM picks each tool, reads the result, and decides
+  what to check next or concludes. Falls back to rules mode if the LLM is down.
+- **rules** (`--mode rules`): the fixed chain, stopping at the first step that
+  finds a root cause:
 
-Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM.
+  ```
+  rule chain → ML engine (scikit-learn) → LLM (local model via Ollama) → human
+  ```
+
+Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM. The one exception is Ollama, which runs on the Mac.
 
 ## Prerequisites (one-time)
 
-- OrbStack installed, with an Ubuntu VM named `clab` (see `InitialSetup.md`).
-- Docker + Containerlab installed inside that VM.
-- Python 3 + pip inside the VM.
-- *(Optional)* An Anthropic API key, for the LLM escalation step. Without it
-  everything else still works and the verdict says the LLM step was skipped.
+Everything in `InitialSetup.md`: the `clab` VM with Docker and Containerlab, the router image, the Python packages, and Ollama with `qwen2.5:7b` on the Mac. Without Ollama the analyzer still works: agent mode falls back to the rule chain.
 
 ## Layout
 
-You'll use two terminals, both inside the VM (`orb -m clab`):
+Two terminals, both inside the VM (`orb -m clab`):
 - **Terminal 1** — runs the REST API (stays open).
 - **Terminal 2** — runs the tests and the analyzer.
 
@@ -34,37 +35,22 @@ orb -m clab
 cd /Users/adyasinghal/HPE-CPP/bgp-ai-troubleshooter
 ```
 
-## Step 2 — Build the router image (once; rebuild only if the Dockerfile changes)
-
-```bash
-cd lab/containerlab
-docker build -t frr-ssh:8.5.2 .
-cd ../..
-```
-
-If the lab is already running, a rebuild doesn't reach the existing containers,
-and `deploy` just reports `no changes`. Destroy the lab first so Step 3
-recreates the containers from the new image:
-
-```bash
-sudo containerlab destroy -t lab/containerlab/topology.clab.yml
-```
-
-## Step 3 — Deploy the lab
+## Step 2 — Deploy the lab
 
 ```bash
 sudo containerlab deploy -t lab/containerlab/topology.clab.yml
 ```
 
-The topology pins the management IPs (`mgmt-ipv4`), so every deploy gives
-**router1 = 172.20.20.2** and **router2 = 172.20.20.3**, the addresses this guide uses.
+If you changed the Dockerfile, rebuild the image first (see `InitialSetup.md`).
+
+The topology pins the management IPs (`mgmt-ipv4`), so every deploy gives **router1 = 172.20.20.2** and **router2 = 172.20.20.3**, the addresses this guide uses.  
 Check them anytime with:
 
 ```bash
 sudo containerlab inspect -t lab/containerlab/topology.clab.yml
 ```
 
-## Step 4 — Configure the BGP neighbors
+## Step 3 — Configure the BGP neighbors
 
 (Neighbor config is not saved across a redeploy; bgpd is already enabled in the image.)
 
@@ -79,18 +65,17 @@ Confirm it's up (wait ~10s for `Established`):
 ssh admin@172.20.20.2 'vtysh -c "show bgp summary"'   # password: admin
 ```
 
-## Step 5 — Start the REST API (Terminal 1)
+## Step 4 — Start the REST API (Terminal 1)
 
 Run this from the repo root (`bgp-ai-troubleshooter/`), not from `lab/`:
 
 ```bash
-python3 -m pip install -r requirements.txt --break-system-packages   # first time, and after requirements.txt changes
 python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
 Leave this running. You should see `Application startup complete.`
 
-## Step 6 — Smoke-test the API (Terminal 2)
+## Step 5 — Smoke-test the API (Terminal 2)
 
 ```bash
 # open a second VM shell
@@ -106,25 +91,63 @@ curl -X POST http://localhost:8000/tools/bgp/state \
 
 Expect: `{"status":"ok"}`, the rules JSON, then `"success": true` with a populated `parsed.peers`.
 
-## Step 7 — (Optional) Enable LLM escalation (Terminal 2)
+## Step 6 — Check the LLM
+
+Ollama runs on the Mac; the analyzer in the VM reaches it at `http://host.orb.internal:11434`, which OrbStack forwards to the Mac's localhost. From Terminal 2:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...        # your key; add to ~/.bashrc to keep it
-export BGP_LLM_MODEL=claude-opus-5         # optional; this is the default
+curl http://host.orb.internal:11434/api/tags   # should list qwen2.5:7b
 ```
 
-Claude is only called when both the rules and the ML engine are stuck, and each
-call is billed to that key. Add `--no-llm` to any analyzer run to skip it.
+The defaults work as-is; set these only to change them:
 
-## Step 8 — Run the Analyze stage (healthy path)
+```bash
+export BGP_LLM_MODEL=qwen2.5:7b                      # any model you've pulled
+export BGP_LLM_URL=http://host.orb.internal:11434    # where Ollama is
+export BGP_LLM_NUM_CTX=16384                         # context window (tokens)
+export BGP_LLM_TIMEOUT=300                           # seconds to wait for an answer
+```
+
+To use Claude instead of the local model, set `BGP_LLM_PROVIDER=anthropic` and
+`ANTHROPIC_API_KEY` (the model defaults to `claude-opus-5-5`; change it with
+`BGP_LLM_MODEL`). All of these settings live in `analyzer/llm_client.py`.
+
+In agent mode the LLM is called once per step (a few seconds each); in rules
+mode only when the rules and ML are stuck. `--no-llm` skips it (implies
+`--mode rules`).
+
+## Step 7 — Run the Analyze stage (healthy path)
 
 ```bash
 python3 -m analyzer.run "My BGP peer is stuck at active state" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-With BGP up, it should check `bgp_state`, find `Established`, and report
-"no action needed":
+With BGP up, the agent checks `bgp_state`, sees `Established` and concludes
+(~20s with qwen2.5:7b):
+
+```
+Resolved:      True
+Root cause:    BGP peer 172.20.20.3 is Established
+Suggested fix: No action needed — the session is up.
+Decided by:    agent (confidence high)
+Tools checked: bgp_state
+Triage:        BGP peer stuck at active state (suspects: tcp_unreachable, remote_as_mismatch, neighbor_shutdown, config_drift)
+Fault class:   healthy
+Rules agree:   yes
+ML opinion:    healthy (1.00)
+Steps:
+  1. bgp_state -> peer Established (Policy) [rule: healthy]
+     why: We need to start by checking the BGP session state ...
+Note:          Diagnosed by qwen2.5:7b
+```
+
+`Triage` is the LLM's reading of the question before any tool ran; an
+off-topic question stops there. `[rule: ...]` marks a result the rule book
+decided on its own. `Rules agree: NO` means the LLM overrode a rule, so check
+its steps. Wording and tool order vary between runs.
+
+With `--mode rules`:
 
 ```
 Resolved:      True
@@ -132,16 +155,24 @@ Root cause:    BGP peer 172.20.20.3 is Established
 Suggested fix: No action needed — the session is up.
 Decided by:    rules
 Tools checked: bgp_state
+Fault class:   healthy
 ML opinion:    healthy (1.00)
 ```
 
-`ML opinion` is the ML engine's second opinion; it's shown whenever the rules
-made the decision.
+If Ollama isn't running, agent mode falls back to the rule chain and says so
+in a `Note:` line.
+
+Every run also writes a log file to `logs/run_<date>-<time>.log` (the path is
+printed as the last line, `Log file:`). It records each step in order: each
+agent decision, every tool call with its payload, result and raw output, each
+rule finding, the ML prediction, the LLM calls and their token usage, and the
+final verdict. If a run crashes, the traceback is in the log too. Use
+`--log-dir <dir>` to write logs somewhere else.
 
 The first run trains the ML model (about a second) and saves it to
 `analyzer/models/`. Later runs reuse it.
 
-## Step 9 — Test the ML engine (inject a fault the rules miss)
+## Step 8 — Inject a fault the rules miss (neighbor shut down)
 
 Shut the neighbor down on router1:
 
@@ -156,7 +187,10 @@ python3 -m analyzer.run "My BGP peer is stuck at active state" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-It walks the whole chain (`bgp_state → interface → tcp_port → config`). None
+The agent sees `Idle (Admin)` (not `Active` as the question says) and
+concludes `neighbor_shutdown`, sometimes after checking `config`.
+
+With `--mode rules` it walks the whole chain (`bgp_state → interface → tcp_port → config`). None
 of the rules fire: the interfaces are up, port 179 is reachable, and there's
 no config baseline to diff against. The ML engine then picks up the
 `Idle (Admin)` state and the `neighbor ... shutdown` line in the running
@@ -168,9 +202,10 @@ Root cause:    Neighbor 172.20.20.3 is administratively shut down
 Suggested fix: router bgp <local-asn> / no neighbor 172.20.20.3 shutdown
 Decided by:    ml (confidence 1.00)
 Tools checked: bgp_state -> interface -> tcp_port -> config
+Fault class:   neighbor_shutdown
 ```
 
-Run it with `--no-ml` to compare: the rules alone report
+Run it with `--no-llm --no-ml` to compare: the rules alone report
 "No root cause found by the rule chain."
 
 Undo the fault:
@@ -179,7 +214,7 @@ Undo the fault:
 docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "no neighbor 172.20.20.3 shutdown" -c "end"
 ```
 
-## Step 10 — Test the LLM escalation (inject an ambiguous fault)
+## Step 9 — Inject an ambiguous fault (remote-as mismatch)
 
 Point router1 at the wrong remote AS. The session keeps failing during the
 OPEN exchange, which the ML engine can't pin down confidently without a
@@ -196,13 +231,27 @@ python3 -m analyzer.run "My BGP peer won't come up" \
   --host 172.20.20.2 --peer 172.20.20.3
 ```
 
-When the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
-case goes to Claude. Expect `Decided by: llm` with Claude's root cause and fix,
-plus a `Next checks:` list of commands to confirm it. Without an API key you'll
-see `Note: LLM escalation skipped: no Anthropic credentials` instead.
+The agent sees `Idle`, then `bgp_neighbor` shows router1 sent a NOTIFICATION
+(Bad Peer AS) and reads the AS router2 really uses from its OPEN:
+
+```
+Root cause:    This router expects AS 65009 for 172.20.20.3, but the peer uses AS 65002.
+Suggested fix: router bgp 65001 neighbor 172.20.20.3 remote-as 65002
+Tools checked: bgp_state -> bgp_neighbor
+```
+
+The same tool catches a neighbor removed on router2 (`Notification received
+(Cease/Peer De-configured)`), which the other four tools can't see.
+
+With `--mode rules`: when the ML engine's confidence is below 0.7 (or its answer is `unknown`), the
+case goes to the LLM. Expect `Decided by: llm` with its root cause and fix,
+plus a `Next checks:` list of commands to confirm it, and a
+`Diagnosed by qwen2.5:7b` note. If Ollama isn't running you'll see
+`Note: LLM escalation skipped: could not reach Ollama ...` instead.
 
 The exact result depends on the BGP state at that moment. If the ML engine is
-confident, it decides and Claude isn't called.
+confident, it decides and the LLM isn't called. A small local model can be
+wrong, so check its answer against `Next checks`.
 
 Undo the fault:
 
@@ -211,10 +260,9 @@ docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "nei
 ```
 
 <!-- Future Work -->
-## Step 11 — (Optional) Save a baseline so config drift is caught by rules
+## Step 10 — (Optional) Save a baseline so config drift is caught by rules
 
-The config rule only fires when a known-good baseline exists. With BGP healthy,
-save one per router:
+The config rule only fires when a known-good baseline exists. With BGP healthy, save one per router:
 
 ```bash
 python3 -c "
@@ -225,14 +273,13 @@ for host in ['172.20.20.2', '172.20.20.3']:
 "
 ```
 
-Repeat the Step 10 fault: now the rules report
+Repeat the Step 9 fault: now the rules report
 "Running config has drifted from the baseline", and the ML opinion names it
 more specifically as `remote_as_mismatch`.
 
-## Step 12 — (Optional) Retrain the ML model
+## Step 11 — (Optional) Retrain the ML model
 
-The model starts out trained on synthetic cases. To retrain, and to add real
-labelled cases (one JSON object per line:
+The model starts out trained on synthetic cases. To retrain, and to add real labelled cases (one JSON object per line:
 `{"evidence": [...], "peer": "172.20.20.3", "label": "remote_as_mismatch"}`):
 
 ```bash
@@ -241,13 +288,13 @@ python3 -m analyzer.ml_engine train --cases cases.jsonl
 ```
 
 It prints per-class precision/recall on a held-out split, then saves the model.
+If the feature list in `ml_engine.py` changes, an old saved model is retrained
+automatically on the next run.
 
 ---
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'tools'/'analyzer'`** — run from the
-  repo root, not from inside a sub-folder.
 - **`Address already in use`** — an old API is still running, often in another
   terminal tab. Stop it with Ctrl-C in that tab, or from anywhere with
   `pkill -f "uvicorn api.main:app"` (`ss -ltnp | grep :8000` shows what holds
@@ -257,7 +304,7 @@ It prints per-class precision/recall on a held-out split, then saves the model.
   the wrong IP; re-check with `containerlab inspect`.
 - **`% Can't open configuration file /etc/frr/vtysh.conf`** — harmless warning;
   the command still ran. The current Dockerfile creates this file, so rebuild
-  the image (Step 2) and redeploy (Step 3) to get rid of it.
+  the image (`InitialSetup.md`) and redeploy (Step 2) to get rid of it.
 - **`WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`** on `ssh admin@172.20.20.x`
   — expected after rebuilding the image, which generates new SSH host keys.
   Clear the old keys with
@@ -269,15 +316,12 @@ It prints per-class precision/recall on a held-out split, then saves the model.
   the router's own address, which happens when the management IPs swapped on a
   deploy. Check with `containerlab inspect`. The pinned `mgmt-ipv4` in the
   topology prevents this; destroy and redeploy if the lab predates it.
-- **`ModuleNotFoundError: No module named 'sklearn'` / `'anthropic'`** — re-run
-  the `pip install -r requirements.txt` line from Step 5.
-- **`LLM escalation skipped: no Anthropic credentials`** — `ANTHROPIC_API_KEY`
-  isn't set in *this* terminal (Step 7). Other `skipped` reasons (rate limit,
-  connection error) are printed the same way.
 - **`Root cause: The diagnostic tools could not reach the router`** — every tool
   failed over SSH; same fixes as `Unable to connect to port 22` above.
 - **ML results look off after upgrading scikit-learn** — retrain with
   `python3 -m analyzer.ml_engine train`.
+- **First agent answer takes minutes** — Ollama unloads the model after 5
+  idle minutes and reloads it on the next call. Later runs are faster.
 
 ## Notes
 
@@ -286,6 +330,6 @@ It prints per-class precision/recall on a held-out split, then saves the model.
   `mgmt-ipv4` lines, IPs follow container start order and can swap between
   deploys.
 - The ML model is trained on synthetic data for now, so its confidence scores
-  are indicative. Claude treats its guess as a hint, not a fact.
+  are indicative. The LLM treats its guess as a hint, not a fact.
 - The classic "interface down → BGP Active" demo needs peering over the `eth1`
   data link (currently peering is over the management network).

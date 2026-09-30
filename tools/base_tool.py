@@ -1,7 +1,7 @@
 """
 Shared base for all Tool cohort tools.
 
-Each tool in the cohort (BGP state, Interface, TCP/port, Config) follows the
+Each tool in the cohort (BGP state, BGP neighbor, Interface, TCP/port, Config) follows the
 same shape: take a target host/peer, run its CLI command via the device
 client, parse the raw output into a small structured result, and return it
 through the REST API layer for the Reasoning loop to consume.

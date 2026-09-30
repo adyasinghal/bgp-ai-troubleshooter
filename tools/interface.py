@@ -1,8 +1,9 @@
 """
 tool2: Interface
-Purpose: send interface state -> runs `show interface detail` (vtysh) or
-falls back to `show interface <name>` for a specific interface, and parses
-admin/link state plus IP address.
+Purpose: send interface state -> runs `show interface` (vtysh) for all
+interfaces, or `show interface <name>` for a specific one, and parses
+admin/link state plus IP address. (FRR 8.5 has no `show interface detail`;
+it treats `detail` as an interface name and prints "% Can't find interface detail".)
 """
 
 import re
@@ -10,7 +11,9 @@ import re
 from tools.base_tool import BaseTool, ToolResult
 
 IFACE_HEADER_RE = re.compile(r"^Interface (?P<name>\S+) is (?P<link>up|down)", re.MULTILINE)
-ADMIN_RE = re.compile(r"administratively (?P<admin>up|down)")
+# FRR shows admin state only through the UP flag: `flags: <UP,BROADCAST,...>` vs
+# `flags: <BROADCAST,MULTICAST>` after `shutdown`. It never prints "administratively down".
+FLAGS_RE = re.compile(r"flags: <(?P<flags>[^>]*)>")
 IP_RE = re.compile(r"inet (?P<ip>\d{1,3}(?:\.\d{1,3}){3})/(?P<prefix>\d+)")
 
 
@@ -18,7 +21,7 @@ class InterfaceTool(BaseTool):
     tool_id = "interface"
 
     def run(self, host: str, interface: str | None = None) -> ToolResult:
-        command = f"show interface {interface}" if interface else "show interface detail"
+        command = f"show interface {interface}" if interface else "show interface"
         result = self.device_client.run_vtysh(host, command)
         parsed = self._parse(result.output)
         return self._wrap(host, result, parsed)
@@ -32,8 +35,11 @@ class InterfaceTool(BaseTool):
                 continue
             name = m.group("name")
             link_state = m.group("link")
-            admin_match = ADMIN_RE.search(block)
-            admin_state = admin_match.group("admin") if admin_match else "up"
+            flags_match = FLAGS_RE.search(block)
+            if flags_match:
+                admin_state = "up" if "UP" in flags_match.group("flags").split(",") else "down"
+            else:
+                admin_state = None   # no flags line, so admin state is unknown
             ip_match = IP_RE.search(block)
             interfaces[name] = {
                 "link_state": link_state,
