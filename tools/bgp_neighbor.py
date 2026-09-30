@@ -1,9 +1,8 @@
 """
 tool5: BGP neighbor
-Purpose: runs `show bgp neighbors <peer>` and parses the configured AS, state,
-admin shutdown and the last reset / NOTIFICATION, which name the cause of most
-stuck sessions. On an OPEN rejected with Bad Peer AS it also reads the AS the
-peer really announced from the OPEN hex dump.
+Purpose: runs `show bgp neighbors <peer>` and parses AS numbers, state, admin
+shutdown and the last reset / NOTIFICATION. On Bad Peer AS it also reads the
+peer's real AS from the OPEN hex dump.
 """
 
 import re

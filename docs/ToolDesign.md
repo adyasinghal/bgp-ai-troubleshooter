@@ -1,7 +1,7 @@
 # Tool Design — Auto-Triage Troubleshooter
 
-(Updated from ToolDesign_Meeting5. Same idea, now reflecting the 4 built tools,
-the LLM agent that drives them, and the rule chain it falls back to.)
+(Updated from ToolDesign_Meeting5: 5 tools now, an LLM agent that drives them,
+and the rule chain it falls back to.)
 
 ## Example
 
@@ -90,9 +90,9 @@ Input (user question)
 Output (answer to the user; unresolved -> hand to a human)
 ```
 
-**Analyze is the loop's brain.** The tools only report facts; Analyze interprets them, decides whether a fault is found, and drives the escalation until the case is resolved or the chain ends. Each later stage only runs when the one before it couldn't decide: rules are free and exact, ML is free but probabilistic, and the LLM is the most flexible but costs money per call.
-
-The auto-triage has access to multiple tools and calls them based on the rules in the rule book.
+The tools only report facts; Analyze interprets them. Each later stage only
+runs when the one before it couldn't decide: rules are exact, ML is
+probabilistic, and the LLM is the most flexible but the slowest.
 
 ## Rule book
 
@@ -111,7 +111,7 @@ bgp_state_check --(if unresolved)--> interface_check
 interface_check --(if unresolved)--> tcp_port_check
 tcp_port_check  --(if unresolved)--> config_check
 config_check    --(if unresolved)--> ML engine
-ML engine       --(if confidence < 0.7 or "unknown")--> LLM (Claude)
+ML engine       --(if confidence < 0.7 or "unknown")--> LLM
 LLM             --(if unresolved)--> human, with the LLM's suggested next checks
 ```
 

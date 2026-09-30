@@ -82,7 +82,6 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
         return {"decision": "continue"}
 
     if tool_id == "config":
-        # With no baseline the whole running config shows up as "drift", which proves nothing.
         if parsed.get("has_baseline") and parsed.get("drifted"):
             return {"decision": "root_cause", "fault_class": "config_drift",
                     "cause": "Running config has drifted from the baseline",
@@ -206,7 +205,7 @@ def diagnose(client, question: str, host: str, peer: str,
                      f" ({outcome['cause']})" if "cause" in outcome else "")
             if outcome["decision"] in ("root_cause", "healthy"):
                 verdict = Verdict(True, outcome["cause"], outcome["fix"], checked, evidence,
-                                  source="rules")
+                                  source="rules", fault_class=outcome["fault_class"])
                 if use_ml:   # second opinion, shown alongside the rule's answer
                     ml = ml_engine.predict(evidence, peer)
                     log.info("ML second opinion: %s (%.2f)", ml.label, ml.confidence)
@@ -225,7 +224,7 @@ def diagnose(client, question: str, host: str, peer: str,
         log.info("ML engine decided: %s (%.2f >= threshold %.2f)",
                  ml.label, ml.confidence, ML_CONFIDENCE_THRESHOLD)
         cause, fix = ml.describe(peer)
-        return Verdict(True, cause, fix, checked, evidence, source="ml",
+        return Verdict(True, cause, fix, checked, evidence, source="ml", fault_class=ml.label,
                        confidence=f"{ml.confidence:.2f}", ml_prediction=ml.to_dict())
     else:
         log.info("ML engine unsure: %s (%.2f, threshold %.2f)",

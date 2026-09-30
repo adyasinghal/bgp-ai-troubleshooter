@@ -1,4 +1,4 @@
-"""Triage: turn a plain-language question into a starting intent."""
+"""Triage: read the question before any tool runs (keywords in rules mode, the LLM in agent mode)."""
 import json
 import logging
 

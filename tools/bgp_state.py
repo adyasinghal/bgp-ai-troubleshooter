@@ -8,24 +8,6 @@ import re
 
 from tools.base_tool import BaseTool, ToolResult
 
-r"""
-# vtysh "show bgp summary" prints a table like:
-# Neighbor        V         AS   MsgRcvd   MsgSent ... State/PfxRcd
-# 10.0.1.1        4      65001         0         0 ...          Active
-PEER_LINE_RE = re.compile(
-    r"^(?P<neighbor>\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+\d+.*?\s(?P<state>Established|Active|Connect|Idle|OpenSent|OpenConfirm|\d+)\s*$",
-    re.MULTILINE,
-)
-"""
-
-# FIX:
-# Before: the regex PEER_LINE_RE assumed the peer line ENDS with the state, so
-# on current FRR output it matched nothing and returned {} -> "queried_peer_state"
-# came back "unknown" even though `raw_output` clearly showed an Established peer.
-# Cause: newer FRR prints "(Policy)" in the state column (eBGP up but policy-
-# filtered) plus extra trailing columns (PfxSnt, Desc), which the regex rejected.
-# Fix: split each line into columns and read column 9 (State/PfxRcd) by index --
-# stable no matter how many extra columns follow -> parsed peers now populate.
 
 class BGPStateTool(BaseTool):
     tool_id = "bgp_state"

@@ -6,8 +6,8 @@ Suggested repo structure
 bgp-ai-troubleshooter/              
 ├── docs/  
 │   ├── GuideToRun.md                       # Instructions on how to run and test the tool  
-│   ├── InitialSetup.md                     # Setup Instructions         
-│   ├── Pre-requisites.md                   # Study notes on BGP   
+│   ├── InitialSetup.md                     # One-time setup: VM, lab image, Python, Ollama   
+│   ├── Pre-requisites.md                   # Study notes (TCP/IP basics)   
 │   ├── project_overview.md         
 │   ├── ToolDesign.md                       # States working of auto triage, tools and rules                   
 ├── lab/  
@@ -28,19 +28,13 @@ bgp-ai-troubleshooter/
 │   ├── llm_client.py             (one entry point for LLM calls: Ollama or Claude)  
 │   ├── rest_client.py            (calls API over HTTP)  
 │   ├── triage.py                 (reads the question: LLM, or keywords in rules mode)  
-│   ├── rules_engine.py           (the reasoning loop)  
+│   ├── rules_engine.py           (rule findings, and the rules-mode chain)  
 │   ├── tool_registry.py          (tool catalog: validates and runs tool calls)  
 │   ├── verdict.py                (builds root_cause/fix output)  
 │   ├── ml_engine.py              (scikit-learn fault classifier)  
-│   └── llm_escalation.py         (hands unresolved cases to Claude)  
+│   └── llm_escalation.py         (rules mode: hands unresolved cases to the LLM)  
 ├── dashboard/                              # Flask or Streamlit UI code  
 │   └── \_\_init\_\_.py  
-├── tests/                                  # python3 -m pytest (no lab or LLM needed)  
-│   ├── \_\_init\_\_.py  conftest.py  fakes.py  scenarios.py  
-│   ├── test_tools.py  test_rules_db.py  test_llm_client.py  test_analyzer.py  
-│   ├── test_rules_engine.py  test_tool_registry.py  test_agent.py  
-│   └── data/                           # real `show bgp neighbors` output  
-├── pytest.ini  
 ├── .gitignore  
 ├── requirements.txt                        # Python dependencies  
 ├── README.md  

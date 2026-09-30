@@ -6,6 +6,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Tests are kept locally only
+tests/
+pytest.ini
 *.egg-info/
 .eggs/
 build/

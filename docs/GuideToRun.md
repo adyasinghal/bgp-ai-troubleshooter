@@ -14,14 +14,11 @@ The Analyze stage has two modes:
   rule chain → ML engine (scikit-learn) → LLM (local model via Ollama) → human
   ```
 
-Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM. The one exception is Ollama, which runs on the Mac (see Step 7).
+Everything runs **inside the OrbStack `clab` VM**, because the tool reaches the routers over SSH and those routers are only reachable from inside the VM. The one exception is Ollama, which runs on the Mac.
 
 ## Prerequisites (one-time)
 
-- OrbStack installed, with an Ubuntu VM named `clab` (see `InitialSetup.md`).
-- Docker + Containerlab installed inside that VM.
-- Python 3 + pip inside the VM.
-- Ollama on the Mac, for the LLM (free, runs locally; Step 7). Without it the analyzer still works: agent mode falls back to the rule chain and the verdict says so.
+Everything in `InitialSetup.md`: the `clab` VM with Docker and Containerlab, the router image, the Python packages, and Ollama with `qwen2.5:7b` on the Mac. Without Ollama the analyzer still works: agent mode falls back to the rule chain and the verdict says so.
 
 ## Layout
 
@@ -38,25 +35,13 @@ orb -m clab
 cd /Users/adyasinghal/HPE-CPP/bgp-ai-troubleshooter
 ```
 
-## Step 2 — Build the router image (once; rebuild only if the Dockerfile changes)
-
-```bash
-cd lab/containerlab
-docker build -t frr-ssh:8.5.2 .
-cd ../..
-```
-
-If the lab is already running, a rebuild doesn't reach the existing containers, and `deploy` just reports `no changes`. Destroy the lab first so Step 3 recreates the containers from the new image:
-
-```bash
-sudo containerlab destroy -t lab/containerlab/topology.clab.yml
-```
-
-## Step 3 — Deploy the lab
+## Step 2 — Deploy the lab
 
 ```bash
 sudo containerlab deploy -t lab/containerlab/topology.clab.yml
 ```
+
+If you changed the Dockerfile, rebuild the image first (see `InitialSetup.md`).
 
 The topology pins the management IPs (`mgmt-ipv4`), so every deploy gives **router1 = 172.20.20.2** and **router2 = 172.20.20.3**, the addresses this guide uses.  
 Check them anytime with:
@@ -65,7 +50,7 @@ Check them anytime with:
 sudo containerlab inspect -t lab/containerlab/topology.clab.yml
 ```
 
-## Step 4 — Configure the BGP neighbors
+## Step 3 — Configure the BGP neighbors
 
 (Neighbor config is not saved across a redeploy; bgpd is already enabled in the image.)
 
@@ -80,18 +65,17 @@ Confirm it's up (wait ~10s for `Established`):
 ssh admin@172.20.20.2 'vtysh -c "show bgp summary"'   # password: admin
 ```
 
-## Step 5 — Start the REST API (Terminal 1)
+## Step 4 — Start the REST API (Terminal 1)
 
 Run this from the repo root (`bgp-ai-troubleshooter/`), not from `lab/`:
 
 ```bash
-python3 -m pip install -r requirements.txt --break-system-packages   # first time, and after requirements.txt changes
 python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
 Leave this running. You should see `Application startup complete.`
 
-## Step 6 — Smoke-test the API (Terminal 2)
+## Step 5 — Smoke-test the API (Terminal 2)
 
 ```bash
 # open a second VM shell
@@ -107,28 +91,15 @@ curl -X POST http://localhost:8000/tools/bgp/state \
 
 Expect: `{"status":"ok"}`, the rules JSON, then `"success": true` with a populated `parsed.peers`.
 
-## Step 7 — Set up the LLM with Ollama
+## Step 6 — Check the LLM
 
-The LLM uses a free local model served by Ollama. Ollama runs **on the Mac, not in the VM**, so it can use the Apple GPU. The analyzer in the VM reaches it at `http://host.orb.internal:11434`, which OrbStack forwards to the Mac's localhost.
-
-**7a. On the Mac (a normal macOS terminal, not `orb -m clab`), once:**
-
-```bash
-brew install ollama
-brew services start ollama          # runs the Ollama server now and at login
-ollama pull qwen2.5:7b              # ~4.7 GB download; the default model
-ollama run qwen2.5:7b "say hi"      # quick check; the first load takes a few seconds
-```
-
-(Or install the Ollama app from ollama.com and open it instead of `brew services start`.)
-
-**7b. In the VM (Terminal 2), check the VM can reach it:**
+Ollama runs on the Mac; the analyzer in the VM reaches it at `http://host.orb.internal:11434`, which OrbStack forwards to the Mac's localhost. From Terminal 2:
 
 ```bash
 curl http://host.orb.internal:11434/api/tags   # should list qwen2.5:7b
 ```
 
-**7c. (Optional) Settings.** The defaults work as-is; set these only to change them:
+The defaults work as-is; set these only to change them:
 
 ```bash
 export BGP_LLM_MODEL=qwen2.5:7b                      # any model you've pulled
@@ -145,7 +116,7 @@ In agent mode the LLM is called once per step (a few seconds each); in rules
 mode only when the rules and ML are stuck. `--no-llm` skips it (implies
 `--mode rules`).
 
-## Step 8 — Run the Analyze stage (healthy path)
+## Step 7 — Run the Analyze stage (healthy path)
 
 ```bash
 python3 -m analyzer.run "My BGP peer is stuck at active state" \
@@ -173,9 +144,8 @@ Note:          Diagnosed by qwen2.5:7b
 
 `Triage` is the LLM's reading of the question before any tool ran; an
 off-topic question stops there. `[rule: ...]` marks a result the rule book
-decided on its own. `Rules agree:
-NO` means the LLM overrode a rule, so check its steps. Wording and tool order
-vary between runs.
+decided on its own. `Rules agree: NO` means the LLM overrode a rule, so check
+its steps. Wording and tool order vary between runs.
 
 With `--mode rules`:
 
@@ -185,6 +155,7 @@ Root cause:    BGP peer 172.20.20.3 is Established
 Suggested fix: No action needed — the session is up.
 Decided by:    rules
 Tools checked: bgp_state
+Fault class:   healthy
 ML opinion:    healthy (1.00)
 ```
 
@@ -195,13 +166,13 @@ Every run also writes a log file to `logs/run_<date>-<time>.log` (the path is
 printed as the last line, `Log file:`). It records each step in order: each
 agent decision, every tool call with its payload, result and raw output, each
 rule finding, the ML prediction, the LLM calls and their token usage, and the
-final verdict. If a run crashes, the traceback is in the log too. Use `--log-dir <dir>` to write
-logs somewhere else.
+final verdict. If a run crashes, the traceback is in the log too. Use
+`--log-dir <dir>` to write logs somewhere else.
 
 The first run trains the ML model (about a second) and saves it to
 `analyzer/models/`. Later runs reuse it.
 
-## Step 9 — Inject a fault the rules miss (neighbor shut down)
+## Step 8 — Inject a fault the rules miss (neighbor shut down)
 
 Shut the neighbor down on router1:
 
@@ -231,6 +202,7 @@ Root cause:    Neighbor 172.20.20.3 is administratively shut down
 Suggested fix: router bgp <local-asn> / no neighbor 172.20.20.3 shutdown
 Decided by:    ml (confidence 1.00)
 Tools checked: bgp_state -> interface -> tcp_port -> config
+Fault class:   neighbor_shutdown
 ```
 
 Run it with `--no-llm --no-ml` to compare: the rules alone report
@@ -242,7 +214,7 @@ Undo the fault:
 docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "no neighbor 172.20.20.3 shutdown" -c "end"
 ```
 
-## Step 10 — Inject an ambiguous fault (remote-as mismatch)
+## Step 9 — Inject an ambiguous fault (remote-as mismatch)
 
 Point router1 at the wrong remote AS. The session keeps failing during the
 OPEN exchange, which the ML engine can't pin down confidently without a
@@ -278,8 +250,8 @@ plus a `Next checks:` list of commands to confirm it, and a
 `Note: LLM escalation skipped: could not reach Ollama ...` instead.
 
 The exact result depends on the BGP state at that moment. If the ML engine is
-confident, it decides and the LLM isn't called. A small local model is less
-reliable than Claude, so always check its answer against `Next checks`.
+confident, it decides and the LLM isn't called. A small local model can be
+wrong, so check its answer against `Next checks`.
 
 Undo the fault:
 
@@ -288,7 +260,7 @@ docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "nei
 ```
 
 <!-- Future Work -->
-## Step 11 — (Optional) Save a baseline so config drift is caught by rules
+## Step 10 — (Optional) Save a baseline so config drift is caught by rules
 
 The config rule only fires when a known-good baseline exists. With BGP healthy, save one per router:
 
@@ -301,11 +273,11 @@ for host in ['172.20.20.2', '172.20.20.3']:
 "
 ```
 
-Repeat the Step 10 fault: now the rules report
+Repeat the Step 9 fault: now the rules report
 "Running config has drifted from the baseline", and the ML opinion names it
 more specifically as `remote_as_mismatch`.
 
-## Step 12 — (Optional) Retrain the ML model
+## Step 11 — (Optional) Retrain the ML model
 
 The model starts out trained on synthetic cases. To retrain, and to add real labelled cases (one JSON object per line:
 `{"evidence": [...], "peer": "172.20.20.3", "label": "remote_as_mismatch"}`):
@@ -316,20 +288,8 @@ python3 -m analyzer.ml_engine train --cases cases.jsonl
 ```
 
 It prints per-class precision/recall on a held-out split, then saves the model.
-
----
-
-## Running the tests
-
-No lab, API server or Ollama needed; SSH and the LLM are faked. From the repo root:
-
-```bash
-python3 -m pytest
-```
-
-Device output for each scenario is in `tests/scenarios.py`. The agent tests
-script the LLM's decisions, so they check the loop, not a real model; for
-that, run Steps 8–10 against the lab.
+If the feature list in `ml_engine.py` changes, an old saved model is retrained
+automatically on the next run.
 
 ---
 
@@ -344,7 +304,7 @@ that, run Steps 8–10 against the lab.
   the wrong IP; re-check with `containerlab inspect`.
 - **`% Can't open configuration file /etc/frr/vtysh.conf`** — harmless warning;
   the command still ran. The current Dockerfile creates this file, so rebuild
-  the image (Step 2) and redeploy (Step 3) to get rid of it.
+  the image (`InitialSetup.md`) and redeploy (Step 2) to get rid of it.
 - **`WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`** on `ssh admin@172.20.20.x`
   — expected after rebuilding the image, which generates new SSH host keys.
   Clear the old keys with
@@ -360,6 +320,8 @@ that, run Steps 8–10 against the lab.
   failed over SSH; same fixes as `Unable to connect to port 22` above.
 - **ML results look off after upgrading scikit-learn** — retrain with
   `python3 -m analyzer.ml_engine train`.
+- **First agent answer takes minutes** — Ollama unloads the model after 5
+  idle minutes and reloads it on the next call. Later runs are faster.
 
 ## Notes
 
@@ -368,6 +330,6 @@ that, run Steps 8–10 against the lab.
   `mgmt-ipv4` lines, IPs follow container start order and can swap between
   deploys.
 - The ML model is trained on synthetic data for now, so its confidence scores
-  are indicative. Claude treats its guess as a hint, not a fact.
+  are indicative. The LLM treats its guess as a hint, not a fact.
 - The classic "interface down → BGP Active" demo needs peering over the `eth1`
   data link (currently peering is over the management network).

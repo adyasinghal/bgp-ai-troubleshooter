@@ -7,6 +7,7 @@ likely fault class with a confidence score. The rules engine uses it to:
   - resolve cases the rule chain could not (when confidence is high enough)
   - give a second opinion on cases the rules did resolve
   - give the LLM a starting hypothesis when a case is escalated
+In agent mode it is a tool the LLM can call (ml_classify) and a second opinion.
 
 The model is a RandomForest trained on synthetic cases built from known BGP
 failure patterns (see _sample). As real cases are collected, label them and
@@ -42,6 +43,9 @@ FEATURES = [
     "iface_checked", "ifaces_down",
     # tcp_port
     "tcp_checked", "tcp_unreachable",
+    # bgp_neighbor: last reset / NOTIFICATION, only while the session is down
+    "nbr_checked", "nbr_not_configured", "nbr_admin_shutdown", "nbr_bad_as_sent",
+    "nbr_bad_as_received", "nbr_peer_deconfigured", "nbr_peer_shutdown", "nbr_never_up",
     # config: running config (works without a baseline)
     "config_checked", "cfg_router_bgp", "cfg_peer_configured", "cfg_peer_shutdown",
     # config: diff against the baseline (only when a baseline exists)
@@ -75,8 +79,8 @@ FAULTS = {
         "router bgp <local-asn> / no neighbor {peer} shutdown",
     ),
     "neighbor_missing": (
-        "Neighbor {peer} is not configured on this router",
-        "router bgp <local-asn> / neighbor {peer} remote-as <peer-asn>",
+        "Neighbor {peer} is not configured on this router or on the peer",
+        "Add the missing side: router bgp <asn> / neighbor <address> remote-as <other-asn>",
     ),
     "config_drift": (
         "BGP configuration has drifted from the baseline",
@@ -128,10 +132,10 @@ def extract_features(evidence: list[dict], peer: str | None = None) -> dict:
     if bgp:
         state = (bgp.get("parsed") or {}).get("queried_peer_state", "unknown")
         f[f"peer_{state.lower()}" if state in PEER_STATES else "peer_unknown"] = 1
-        f["peer_admin_shutdown"] = int(any(
-            line.split()[:1] == [peer] and "(Admin)" in line
-            for line in (bgp.get("raw_output") or "").splitlines()
-        ))
+        f["peer_admin_shutdown"] = int(
+            (bgp.get("parsed") or {}).get("queried_peer_state_reason") == "Admin"
+            or any(line.split()[:1] == [peer] and "(Admin)" in line
+                   for line in (bgp.get("raw_output") or "").splitlines()))
     else:
         f["peer_not_checked"] = 1
 
@@ -146,6 +150,21 @@ def extract_features(evidence: list[dict], peer: str | None = None) -> dict:
     if tcp:
         f["tcp_checked"] = 1
         f["tcp_unreachable"] = int((tcp.get("parsed") or {}).get("reachable") is False)
+
+    nbr = by_tool.get("bgp_neighbor")
+    if nbr:
+        p = nbr.get("parsed") or {}
+        f["nbr_checked"] = 1
+        f["nbr_not_configured"] = int(p.get("configured") is False)
+        if p.get("configured", True) and p.get("state") != "Established":
+            note = p.get("notification") or {}
+            error, sent = note.get("error", ""), note.get("direction") == "sent"
+            f["nbr_admin_shutdown"] = int(bool(p.get("admin_shutdown")))
+            f["nbr_bad_as_sent"] = int("Bad Peer AS" in error and sent)
+            f["nbr_bad_as_received"] = int("Bad Peer AS" in error and not sent)
+            f["nbr_peer_deconfigured"] = int("Peer De-configured" in error and not sent)
+            f["nbr_peer_shutdown"] = int("Administrative Shutdown" in error and not sent)
+            f["nbr_never_up"] = int(p.get("connections_established") == 0)
 
     cfg = by_tool.get("config")
     if cfg:
@@ -174,80 +193,100 @@ def _vector(f: dict) -> list[int]:
 # --- synthetic training data ---
 
 NOISY = ["peer_admin_shutdown", "cfg_peer_shutdown", "diff_neighbor",
-         "diff_router_bgp", "tcp_unreachable", "cfg_router_bgp"]
+         "diff_router_bgp", "tcp_unreachable", "cfg_router_bgp", "nbr_never_up"]
 
 
 def _sample(label: str, rng: random.Random) -> dict:
-    """One synthetic feature dict that looks like a real case of `label`."""
-    f = dict.fromkeys(FEATURES, 0)
+    """One synthetic feature dict that looks like a real case of `label`.
+
+    Builds what every tool would show, then drops some: the rule chain stops
+    early and the agent picks its own tools, so any subset can come up.
+    """
     maybe = lambda p=0.5: rng.random() < p
     stuck = lambda: rng.choice(["Active", "Connect", "Idle"])
+    shown = {}
 
-    def peer(state):
-        f[f"peer_{state.lower()}"] = 1
+    def peer(state, admin=False):
+        shown["bgp_state"] = {f"peer_{state.lower()}": 1, "peer_admin_shutdown": int(admin)}
 
     def iface(down=0):
-        f["iface_checked"], f["ifaces_down"] = 1, down
+        shown["interface"] = {"iface_checked": 1, "ifaces_down": down}
 
     def tcp(unreachable=0):
-        f["tcp_checked"], f["tcp_unreachable"] = 1, unreachable
+        shown["tcp_port"] = {"tcp_checked": 1, "tcp_unreachable": unreachable}
 
-    def config(baseline, diff=(), running=("cfg_router_bgp", "cfg_peer_configured")):
-        f["config_checked"] = 1
-        for k in running:
-            f[k] = 1
-        if baseline:
+    def config(diff=(), running=("cfg_router_bgp", "cfg_peer_configured"), baseline=None):
+        f = {"config_checked": 1, **dict.fromkeys(running, 1)}
+        if maybe(0.4) if baseline is None else baseline:
             f["config_has_baseline"] = 1
             if diff:
                 f["config_drifted"] = 1
-                for d in diff:
-                    f[d] = 1
+                f.update(dict.fromkeys(diff, 1))
+        shown["config"] = f
 
-    # Cases the rules catch stop early, so later tools are often unchecked.
-    if label == "healthy":
-        if maybe(0.7):   # rules stop right after an Established bgp_state
-            peer("Established")
-        else:
-            f["peer_not_checked"] = 1
-            iface(); tcp(); config(maybe(0.6))
-    elif label == "interface_down":
-        peer(stuck()); iface(down=rng.randint(1, 2))
-        if maybe(0.3):
-            tcp(unreachable=int(maybe(0.7)))
-    elif label == "tcp_unreachable":
-        peer(rng.choice(["Active", "Connect"])); iface(); tcp(unreachable=1)
-        if maybe(0.3):
-            config(maybe(0.5))
-    elif label == "remote_as_mismatch":
-        iface(); tcp()
-        if maybe(0.7):   # baseline shows the remote-as line changed
-            peer(rng.choice(["Active", "Idle", "OpenSent", "Connect"]))
-            config(True, diff=("diff_remote_as", "diff_neighbor"))
-        else:            # no baseline: OPEN exchange keeps failing
-            peer(rng.choice(["OpenSent", "OpenConfirm", "Idle"]))
-            config(False)
-    elif label == "neighbor_shutdown":
-        peer("Idle"); f["peer_admin_shutdown"] = int(maybe(0.9))
-        iface(); tcp()
-        config(maybe(0.5), diff=("diff_shutdown", "diff_neighbor"),
-               running=("cfg_router_bgp", "cfg_peer_configured", "cfg_peer_shutdown"))
-    elif label == "neighbor_missing":
-        f["peer_unknown"] = 1; iface(); tcp()
-        config(maybe(0.5), diff=("diff_neighbor", "diff_remote_as"), running=("cfg_router_bgp",))
-    elif label == "config_drift":
-        peer(stuck()); iface(); tcp()
-        config(True, diff=rng.choice([("diff_router_bgp",), ("diff_neighbor",),
-                                      ("diff_router_bgp", "diff_neighbor")]))
-    elif label == "device_unreachable":
+    def neighbor(*flags):
+        shown["bgp_neighbor"] = {"nbr_checked": 1, **dict.fromkeys(flags, 1)}
+
+    if label == "device_unreachable":
+        f = dict.fromkeys(FEATURES, 0)
         f["peer_not_checked"] = 1
-        f["tool_errors"] = rng.randint(2, 4)
+        f["tool_errors"] = rng.randint(1, 5)
+        return f
+
+    key = "bgp_state"   # the tool that shows the fault
+    if label == "healthy":
+        peer("Established"); iface(); tcp(); config(); neighbor()
+    elif label == "interface_down":
+        peer(stuck()); iface(down=rng.randint(1, 2)); tcp(int(maybe(0.7))); config()
+        neighbor("nbr_never_up") if maybe(0.7) else neighbor()
+        key = "interface"
+    elif label == "tcp_unreachable":
+        peer(rng.choice(["Active", "Connect"])); iface(); tcp(1); config()
+        neighbor("nbr_never_up") if maybe(0.8) else neighbor()
+        key = "tcp_port"
+    elif label == "remote_as_mismatch":
+        peer(rng.choice(["Idle", "Idle", "OpenSent", "OpenConfirm", "Active"])); iface(); tcp()
+        config(diff=("diff_remote_as", "diff_neighbor"))
+        neighbor("nbr_bad_as_sent" if maybe(0.75) else "nbr_bad_as_received")
+        key = "bgp_neighbor"
+    elif label == "neighbor_shutdown":
+        if maybe(0.7):   # on this router
+            peer("Idle", admin=maybe(0.95)); iface(); tcp()
+            config(diff=("diff_shutdown", "diff_neighbor"),
+                   running=("cfg_router_bgp", "cfg_peer_configured", "cfg_peer_shutdown"))
+            neighbor("nbr_admin_shutdown")
+        else:            # on the peer
+            peer(rng.choice(["Active", "Idle"])); iface(); tcp(); config()
+            neighbor("nbr_peer_shutdown")
+            key = "bgp_neighbor"
+    elif label == "neighbor_missing":
+        if maybe(0.5):   # on this router
+            shown["bgp_state"] = {"peer_unknown": 1}; iface(); tcp()
+            config(diff=("diff_neighbor", "diff_remote_as"), running=("cfg_router_bgp",))
+            neighbor("nbr_not_configured")
+        else:            # removed on the peer
+            peer(stuck()); iface(); tcp(); config()
+            neighbor("nbr_peer_deconfigured")
+            key = "bgp_neighbor"
+    elif label == "config_drift":
+        peer(stuck()); iface(); tcp(); neighbor()
+        config(diff=rng.choice([("diff_router_bgp",), ("diff_neighbor",),
+                                ("diff_router_bgp", "diff_neighbor")]), baseline=True)
+        key = "config"
     elif label == "unknown":
         # OpenSent/OpenConfirm also fit router-id conflicts, MD5 or capability
         # mismatches, so they overlap with remote_as_mismatch on purpose.
         peer(stuck() if maybe(0.6) else rng.choice(["OpenSent", "OpenConfirm"]))
-        iface(); tcp(); config(maybe(0.5))
+        iface(); tcp(); config(); neighbor()
 
-    if label != "device_unreachable" and maybe(0.05):
+    keep = {key: 0.85, "bgp_state": 0.95}
+    kept = [tool for tool in shown if maybe(keep.get(tool, 0.5))]
+    f = dict.fromkeys(FEATURES, 0)
+    for tool in kept:
+        f.update(shown[tool])
+    if "bgp_state" not in kept:
+        f["peer_not_checked"] = 1
+    if maybe(0.05):
         f["tool_errors"] = 1
     for k in NOISY:
         if maybe(0.02):
@@ -303,6 +342,8 @@ def _load_model() -> RandomForestClassifier:
     if _model is None:
         try:
             _model = joblib.load(MODEL_PATH)
+            if _model.n_features_in_ != len(FEATURES):
+                raise ValueError(f"model has {_model.n_features_in_} features, code has {len(FEATURES)}")
             log.info("Loaded ML model from %s", MODEL_PATH)
         except Exception as e:   # missing, or saved by an incompatible sklearn version
             log.info("No usable ML model at %s (%s); training a new one", MODEL_PATH, e)
