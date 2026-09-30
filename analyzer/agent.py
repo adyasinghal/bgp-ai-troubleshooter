@@ -16,9 +16,13 @@ RAW_OUTPUT_LIMIT = 2500
 FIRST_TOOL = "bgp_state"
 MAX_REJECTS = 2   # in a row, then the LLM must conclude
 
-# config_drift is generic, so the specific config faults count as agreeing
+ROUTE_CLASSES = {"route_not_selected", "route_filtered", "route_not_received", "route_as_intended"}
+
+# config_drift is generic, so the specific config faults count as agreeing;
+# a healthy session is consistent with any route answer
 AGREES_WITH = {
     "config_drift": {"config_drift", "remote_as_mismatch", "neighbor_shutdown", "neighbor_missing"},
+    "healthy": {"healthy"} | ROUTE_CLASSES,
 }
 
 log = logging.getLogger(__name__)
@@ -132,6 +136,9 @@ class Investigation:
         finding = rules_engine.evaluate(tool_id, result, self.ctx)
         if finding["decision"] == "continue" and "hint" not in finding:
             finding["suggested_next_intent"] = self.registry.next_intent_after(tool_id)
+        elif finding["decision"] == "healthy":
+            finding["note"] = ("The session is up. If the question is about the session, conclude; "
+                               "if it is about routes or prefixes, continue with route_table.")
         else:
             finding["note"] = "The rule book considers this decided. Conclude unless other evidence contradicts it."
         summary = summarize(tool_id, result)
@@ -186,7 +193,8 @@ class Investigation:
                  resolved, d["fault_class"], d["confidence"], rules_agree, d["root_cause"])
 
         return Verdict(resolved, d["root_cause"], d["suggested_fix"], self.checked, self.evidence,
-                       source="agent", confidence=d["confidence"], ml_prediction=self._ml_opinion(),
+                       source="agent", confidence=d["confidence"],
+                       ml_prediction=None if d["fault_class"] in ROUTE_CLASSES else self._ml_opinion(),
                        next_checks=list(d["next_checks"]), notes=notes,
                        fault_class=d["fault_class"], rules_agree=rules_agree,
                        triage=self.triage, steps=self._public_steps())
@@ -268,6 +276,18 @@ def summarize(tool_id: str, result: dict) -> str:
         if not p.get("has_baseline"):
             return "running config read (no baseline)"
         return "drifted from baseline" if p.get("drifted") else "matches baseline"
+    if tool_id == "route_table":
+        if p.get("in_table") is False:
+            return f"{p.get('prefix')} not in the BGP table"
+        best = p.get("best_path")
+        if not best:
+            return f"{p.get('path_count', 0)} path(s), none best"
+        reason = f" ({best['best_reason']})" if best.get("best_reason") else ""
+        return f"{p['path_count']} path(s), best via {best['next_hop']}{reason}"
+    if tool_id == "route_map":
+        denies = [f"{m['name']} {m['sequence']}" for m in p.get("route_maps", [])
+                  if m["action"] == "deny" and m.get("invoked")]
+        return f"{p.get('count', 0)} entries" + (f", denying: {', '.join(denies)}" if denies else "")
     if tool_id == "ml_classify":
         return f"{p.get('label')} ({p.get('confidence', 0):.2f})"
     return "ok"

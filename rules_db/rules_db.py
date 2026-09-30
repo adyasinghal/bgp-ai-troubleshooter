@@ -46,6 +46,8 @@ class Rule:
     condition: Optional[str]
     next_intent_on_fail: Optional[str]
     symptoms: str = ""
+    likely_causes: str = ""
+    verification: str = ""
 
 
 def _tool(row: sqlite3.Row) -> ToolSpec:
@@ -143,11 +145,13 @@ class RulesDB:
 
     def add_rule(self, intent: str, tool_id: str, priority: int = 1,
                  condition: str = "", next_intent_on_fail: Optional[str] = None,
-                 symptoms: str = ""):
+                 symptoms: str = "", likely_causes: str = "", verification: str = ""):
         self.conn.execute(
-            """INSERT INTO rules (intent, tool_id, priority, condition, next_intent_on_fail, symptoms)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (intent, tool_id, priority, condition, next_intent_on_fail, symptoms),
+            """INSERT INTO rules (intent, tool_id, priority, condition, next_intent_on_fail,
+                                  symptoms, likely_causes, verification)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (intent, tool_id, priority, condition, next_intent_on_fail,
+             symptoms, likely_causes, verification),
         )
         self.conn.commit()
 

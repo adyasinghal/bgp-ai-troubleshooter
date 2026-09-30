@@ -260,7 +260,48 @@ docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "nei
 ```
 
 <!-- Future Work -->
-## Step 10 — (Optional) Save a baseline so config drift is caught by rules
+## Step 10 — Ask about a route (route-map filtering)
+
+The sessions so far exchange no routes. Have router2 advertise two prefixes,
+and give router1 an inbound route-map that drops one of them:
+
+```bash
+docker exec clab-bgp-lab-router2 vtysh -c "conf t" -c "router bgp 65002" -c "no bgp ebgp-requires-policy" -c "no bgp network import-check" -c "address-family ipv4 unicast" -c "network 192.168.10.0/24" -c "network 192.168.20.0/24" -c "end"
+docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "ip prefix-list BLOCK20 seq 5 permit 192.168.20.0/24" -c "route-map FROM-R2 deny 10" -c "match ip address prefix-list BLOCK20" -c "exit" -c "route-map FROM-R2 permit 20" -c "exit" -c "router bgp 65001" -c "no bgp ebgp-requires-policy" -c "address-family ipv4 unicast" -c "neighbor 172.20.20.3 route-map FROM-R2 in" -c "end"
+```
+
+`show bgp summary` on router1 now shows a prefix count instead of `(Policy)`.
+Ask about the missing prefix:
+
+```bash
+python3 -m analyzer.run "Why don't I get 192.168.20.0/24 from router2?" \
+  --host 172.20.20.2 --peer 172.20.20.3
+```
+
+The session is Established, but since the question is about a route the agent
+keeps going:
+
+```
+Tools checked: bgp_state -> route_table -> route_map
+Fault class:   route_filtered
+Steps:
+  1. bgp_state -> peer Established [rule: healthy]
+  2. route_table -> 192.168.20.0/24 not in the BGP table
+  3. route_map -> 2 entries, denying: FROM-R2 10
+```
+
+Rules mode stops at the healthy session, so it can't answer route questions.
+Comparing two paths to the same prefix (best-path selection) needs a third
+router, which this lab doesn't have.
+
+Undo it:
+
+```bash
+docker exec clab-bgp-lab-router1 vtysh -c "conf t" -c "router bgp 65001" -c "address-family ipv4 unicast" -c "no neighbor 172.20.20.3 route-map FROM-R2 in" -c "exit-address-family" -c "bgp ebgp-requires-policy" -c "exit" -c "no route-map FROM-R2" -c "no ip prefix-list BLOCK20" -c "end"
+docker exec clab-bgp-lab-router2 vtysh -c "conf t" -c "router bgp 65002" -c "address-family ipv4 unicast" -c "no network 192.168.10.0/24" -c "no network 192.168.20.0/24" -c "exit-address-family" -c "bgp ebgp-requires-policy" -c "bgp network import-check" -c "end"
+```
+
+## Step 11 — (Optional) Save a baseline so config drift is caught by rules
 
 The config rule only fires when a known-good baseline exists. With BGP healthy, save one per router:
 
@@ -277,7 +318,7 @@ Repeat the Step 9 fault: now the rules report
 "Running config has drifted from the baseline", and the ML opinion names it
 more specifically as `remote_as_mismatch`.
 
-## Step 11 — (Optional) Retrain the ML model
+## Step 12 — (Optional) Retrain the ML model
 
 The model starts out trained on synthetic cases. To retrain, and to add real labelled cases (one JSON object per line:
 `{"evidence": [...], "peer": "172.20.20.3", "label": "remote_as_mismatch"}`):

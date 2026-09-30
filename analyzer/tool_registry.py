@@ -57,6 +57,7 @@ class ToolRegistry:
             "when_to_use": t["when_to_use"],
             "args": t["args_schema"],
             "rules": [{"intent": r["intent"], "symptoms": r["symptoms"],
+                       "likely_causes": r["likely_causes"], "verification": r["verification"],
                        "next_intent_on_fail": r["next_intent_on_fail"]}
                       for r in self.rules if r["tool_id"] == t["tool_id"]],
         } for t in self.tools.values()]

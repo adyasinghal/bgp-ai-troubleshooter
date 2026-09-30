@@ -65,6 +65,12 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
     if tool_id == "bgp_neighbor":
         return _neighbor_finding(parsed, ctx)
 
+    if tool_id == "route_table":
+        return {"decision": "continue", "hint": _route_table_hint(parsed)}
+
+    if tool_id == "route_map":
+        return {"decision": "continue", "hint": _route_map_hint(parsed)}
+
     if tool_id == "interface":
         down = [n for n, i in parsed.get("interfaces", {}).items()
                 if i.get("link_state") == "down" or i.get("admin_state") == "down"]
@@ -89,6 +95,34 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
         return {"decision": "continue", "hint": _neighbor_facts(result.get("raw_output") or "", ctx.get("peer"))}
 
     return {"decision": "continue"}
+
+
+def _route_table_hint(p: dict) -> str:
+    if p.get("in_table") is False:
+        return (f"This router has no route for {p.get('prefix')}: the peer doesn't advertise it, or an inbound "
+                f"route-map/prefix-list filters it. Check route_map: a deny entry with invoked > 0 points at filtering.")
+    best = p.get("best_path")
+    if not best:
+        return "No best path in the table."
+    others = p.get("paths_not_selected", [])
+    if best.get("best_reason"):
+        return (f"Best path via {best['next_hop']} wins on {best['best_reason']}; the other {len(others)} path(s) "
+                f"lose at that step of the best-path order. If a route-map set the deciding attribute, check route_map.")
+    return f"{p.get('path_count')} path(s). Pass a prefix to see why the best path wins."
+
+
+def _route_map_hint(p: dict) -> str:
+    denies = [f"{m['name']} seq {m['sequence']} ({'; '.join(m['match_clauses']) or 'matches everything'})"
+              for m in p.get("route_maps", []) if m["action"] == "deny" and m.get("invoked")]
+    sets = [f"{m['name']} seq {m['sequence']} sets {'; '.join(m['set_clauses'])}"
+            for m in p.get("route_maps", []) if m["set_clauses"]]
+    parts = []
+    if denies:
+        parts.append("Deny entries that matched routes: " + ", ".join(denies)
+                     + ". Routes they match are filtered (route_filtered, or route_as_intended if that's the intended policy).")
+    if sets:
+        parts.append("Entries that change attributes: " + ", ".join(sets) + ".")
+    return " ".join(parts) or "No route-map entry denies routes or changes attributes."
 
 
 def _neighbor_finding(p: dict, ctx: dict) -> dict:
