@@ -29,6 +29,7 @@ bgp-ai-troubleshooter/
 ├── tools/                          
 │   ├── \_\_init\_\_.py  base_tool.py  device_client.py  
 │   ├── bgp_state.py  bgp_neighbor.py  interface.py  tcp_port.py  config.py  
+│   ├── route_table.py  route_map.py  
 ├── rules_db/                       
 │   ├── \_\_init\_\_.py  rules_db.py  schema.sql  
 ├── api/                                    # SSH/API connection and command execution  

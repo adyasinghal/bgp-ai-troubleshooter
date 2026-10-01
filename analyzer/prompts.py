@@ -1,7 +1,8 @@
 """Prompts and output schemas for the LLM agent."""
 import json
 
-# ml_engine.FAULTS labels, so answers can be compared with ML and the rules
+# ml_engine.FAULTS labels, so answers can be compared with ML and the rules,
+# plus route classes the ML engine doesn't cover
 FAULT_CLASSES = {
     "healthy": "the session is up; nothing to fix",
     "interface_down": "an interface on the path to the peer is down",
@@ -11,6 +12,10 @@ FAULT_CLASSES = {
     "neighbor_missing": "the neighbor isn't configured on this router or on the peer",
     "config_drift": "the BGP config changed from the known-good baseline in another way",
     "device_unreachable": "the tools could not reach the router",
+    "route_not_selected": "the route is received but another path wins the best-path comparison",
+    "route_filtered": "a route-map or prefix-list denies the route or changes its attributes",
+    "route_not_received": "the peer doesn't advertise the prefix to this router",
+    "route_as_intended": "the route is selected or filtered exactly as the policy intends; not a fault",
     "other": "a cause not listed here (MD5, router-id, multihop/TTL, update-source, a fault on the peer...)",
 }
 
@@ -18,7 +23,7 @@ STATES = ["Established", "Active", "Connect", "Idle", "OpenSent", "OpenConfirm",
 
 TRIAGE_PROMPT = """You are a senior network engineer. Before any diagnostic tool runs, read an operator's question about BGP on an FRR router and plan the investigation.
 
-- in_scope: false only if the question is not about this router's BGP sessions, its links or its config.
+- in_scope: false only if the question is not about this router's BGP sessions, routes, links or config.
 - symptom: one sentence restating the problem.
 - claimed_state: the BGP state the operator reports, or "none". It is only a claim until a tool checks it.
 - interface: an interface named in the question, or "".
@@ -36,7 +41,7 @@ How to work:
 - Choose the tool that best tells your remaining hypotheses apart. Each rule's symptoms and each tool's when_to_use say what fits; a rule's next_intent_on_fail is a sensible default, not an order.
 - Every tool result comes with a rule_finding from a deterministic rule book. A "root_cause" or "healthy" finding is a verified fact: conclude with it unless other evidence clearly shows it is misleading, and then say why in your thought.
 - Never call a tool again with the same args; its result won't change.
-- Conclude as soon as the evidence supports one specific root cause, or shows the session is healthy. An Established session is healthy: conclude right away. Don't call extra tools just to be thorough.
+- Conclude as soon as the evidence supports one specific root cause, or shows the session is healthy. An Established session is healthy: conclude right away, unless the question is about routes or prefixes. Then check them with route_table (pass the prefix), and route_map if a route is missing or loses on an attribute a policy can set. Don't call extra tools just to be thorough.
 - If the tool output contradicts the operator's description, trust the tool output and point out the difference in root_cause.
 - The tools only see this router. If the evidence points at the peer, say so and give next_checks to run on the peer.
 
@@ -48,7 +53,7 @@ When you conclude, fill in diagnosis:
 - fault_class: the category that fits best (see fault_classes in the case).
 - suggested_fix: exact FRR commands where possible, and which router to run them on.
 - confidence: low, medium or high.
-- next_checks: exact commands (and on which router) that would confirm the diagnosis.
+- next_checks: exact commands (and on which router) that would confirm the diagnosis or the fix; the matching rule's verification says what to look for.
 
 Reply with only a JSON object:
 - thought: 1-3 sentences on what the evidence so far shows and why you chose this action.

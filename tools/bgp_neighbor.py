@@ -18,6 +18,7 @@ CONNECTIONS_RE = re.compile(r"Connections established (?P<up>\d+); dropped (?P<d
 LAST_RESET_RE = re.compile(r"Last reset \S+,\s+(?P<reason>.+)")
 NOTIFICATION_RE = re.compile(r"Notification (?P<direction>sent|received) \((?P<error>[^)]+)\)")
 LOCAL_HOST_RE = re.compile(r"^Local host: (?P<ip>[\d.]+)", re.MULTILINE)
+HOLD_TIME_RE = re.compile(r"Hold time is (?P<hold>\d+)")
 HEX_RE = re.compile(r"^\s+(?:[0-9A-F]{2,8}\s*)+$")
 
 AS_TRANS = 23456
@@ -48,6 +49,7 @@ class BGPNeighborTool(BaseTool):
             "remote_router_id": _group(ROUTER_ID_RE, output, "id"),
             "local_host": _group(LOCAL_HOST_RE, output, "ip"),
             "last_reset": _group(LAST_RESET_RE, output, "reason"),
+            "hold_time": _int(_group(HOLD_TIME_RE, output, "hold")),
             "notification": None,
             "peer_open_as": None,
         }
@@ -68,6 +70,10 @@ class BGPNeighborTool(BaseTool):
 def _group(regex: re.Pattern, text: str, name: str) -> str | None:
     m = regex.search(text)
     return m[name] if m else None
+
+
+def _int(text: str | None) -> int | None:
+    return int(text) if text else None
 
 
 def _open_as(output: str) -> int | None:
