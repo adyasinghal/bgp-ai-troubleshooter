@@ -5,8 +5,16 @@ prefix in detail) and reports which paths exist, which one is best (">") and
 the attributes the best-path algorithm compares: weight, local-pref, AS-path
 length, origin, MED. For one prefix it also gives FRR's reason the best path
 won, e.g. "Local Pref" or "AS Path".
+
+Each path also carries its status flags, because a path that is not best is
+not always a path that lost the comparison:
+    valid      - "*": usable. Not valid usually means the next hop is unreachable.
+    multipath  - "=": installed alongside the best path (ECMP)
+    internal   - "i" in the status column: learned over iBGP
+    next_hop_reachable - False when FRR marks the next hop "(inaccessible)"
 """
 
+import ipaddress
 import re
 
 from tools.base_tool import BaseTool, ToolResult
@@ -16,7 +24,8 @@ ORIGINS = {"i": "i", "e": "e", "?": "?", "IGP": "i", "EGP": "e", "incomplete": "
 
 # `show ip bgp <prefix>` detail
 ENTRY_RE = re.compile(r"BGP routing table entry for (?P<network>\S+?),")
-FROM_RE = re.compile(r"^\s+(?P<nexthop>\S+) from (?P<peer>\S+) \((?P<router_id>[\d.]+)\)")
+# "10.0.12.2 from 10.0.12.2 (2.2.2.2)"; iBGP may add "(inaccessible)" or "(metric 10)" after the next hop
+FROM_RE = re.compile(r"^\s+(?P<nexthop>\S+)(?P<notes>(?: \([^)]*\))*) from (?P<peer>\S+) \((?P<router_id>[\d.]+)\)")
 ATTR_RE = {
     "metric": re.compile(r"metric (\d+)"),
     "local_pref": re.compile(r"localpref (\d+)"),
@@ -70,6 +79,14 @@ def _number(text: str) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
 def _parse_table(output: str) -> list[dict]:
     """The `show ip bgp` table. Columns are read by position because FRR leaves
     LocPrf (and the network, on a second path to the same prefix) blank."""
@@ -86,13 +103,14 @@ def _parse_table(output: str) -> list[dict]:
     paths, network = [], None
     for row in output[header.end():].splitlines():
         status = row[:net_at]
-        if "*" not in status:
-            continue
-        network = row[net_at:hop_at].strip() or network
+        network_field = row[net_at:hop_at].strip()
         hop_metric = row[hop_at:metric_end].split()
         rest = row[weight_end:].split()
-        if not hop_metric or not rest:
+        # rows without "*" are invalid paths (kept: they explain a missing route);
+        # anything without a next-hop address is a footer/summary line
+        if not hop_metric or not rest or not _is_ip(hop_metric[0]):
             continue
+        network = network_field or network
         origin = ORIGINS.get(rest[-1], rest[-1])
         paths.append(_path(
             network, hop_metric[0],
@@ -100,6 +118,7 @@ def _parse_table(output: str) -> list[dict]:
             _number(row[metric_end:locprf_end]),
             _number(row[locprf_end:weight_end]),
             rest[:-1], origin, ">" in status,
+            valid="*" in status, multipath="=" in status, internal="i" in status,
         ))
     return paths
 
@@ -119,11 +138,16 @@ def _parse_detail(output: str) -> list[dict]:
         values = {k: (int(r.search(attrs).group(1)) if r.search(attrs) else None) for k, r in ATTR_RE.items()}
         origin = ORIGIN_RE.search(attrs)
         best = BEST_RE.search(attrs)
+        flags = {w.strip() for w in attrs.split(",")}
         paths.append(_path(
             network, m["nexthop"], values["metric"], values["local_pref"], values["weight"],
             [] if as_line == "Local" else as_line.split(),
             ORIGINS.get(origin.group(1)) if origin else None,
             best is not None,
-            from_peer=m["peer"], best_reason=best["reason"] if best else None,
+            from_peer=m["peer"], router_id=m["router_id"],
+            best_reason=best["reason"] if best else None,
+            valid="valid" in flags, multipath="multipath" in flags,
+            internal="internal" in flags,
+            next_hop_reachable="(inaccessible)" not in m["notes"],
         ))
     return paths
