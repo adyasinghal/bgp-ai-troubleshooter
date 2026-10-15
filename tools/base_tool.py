@@ -1,7 +1,7 @@
 """
 Shared base for all Tool cohort tools.
 
-Each tool in the cohort (BGP state, BGP neighbor, Interface, TCP/port, Config) follows the
+Each tool in the cohort (BGP state, Interface, TCP/port, Config) follows the
 same shape: take a target host/peer, run its CLI command via the device
 client, parse the raw output into a small structured result, and return it
 through the REST API layer for the Reasoning loop to consume.
@@ -10,7 +10,7 @@ through the REST API layer for the Reasoning loop to consume.
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from tools.device_client import FRRDeviceClient, DeviceResult
+from tools.device_client import DeviceClientProtocol, DeviceResult, make_device_client
 
 
 @dataclass
@@ -38,8 +38,8 @@ class ToolResult:
 class BaseTool:
     tool_id: str = "base"
 
-    def __init__(self, device_client: Optional[FRRDeviceClient] = None):
-        self.device_client = device_client or FRRDeviceClient()
+    def __init__(self, device_client: Optional[DeviceClientProtocol] = None):
+        self.device_client = device_client or make_device_client()
 
     def _wrap(self, host: str, result: DeviceResult, parsed: dict) -> ToolResult:
         return ToolResult(
