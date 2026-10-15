@@ -21,8 +21,13 @@ ROUTE_CLASSES = {"route_not_selected", "route_filtered", "route_not_received", "
 # config_drift is generic, so the specific config faults count as agreeing;
 # a healthy session is consistent with any route answer
 AGREES_WITH = {
-    "config_drift": {"config_drift", "remote_as_mismatch", "neighbor_shutdown", "neighbor_missing"},
+    "config_drift": {"config_drift", "remote_as_mismatch", "neighbor_shutdown", "neighbor_missing",
+                     "auth_mismatch", "max_prefix_exceeded", "capability_mismatch", "router_id_conflict",
+                     "afi_not_negotiated"},
     "healthy": {"healthy"} | ROUTE_CLASSES,
+    "no_route_to_peer": {"no_route_to_peer", "interface_down", "tcp_unreachable"},
+    "peer_not_listening": {"peer_not_listening", "tcp_unreachable"},
+    "tcp_unreachable": {"tcp_unreachable", "peer_not_listening", "no_route_to_peer"},
 }
 
 log = logging.getLogger(__name__)
@@ -271,11 +276,25 @@ def summarize(tool_id: str, result: dict) -> str:
         down = [n for n, i in ifaces.items() if "down" in (i.get("link_state"), i.get("admin_state"))]
         return f"down: {', '.join(down)}" if down else f"{len(ifaces)} interface(s) up"
     if tool_id == "tcp_port":
-        return "port 179 reachable" if p.get("reachable") else "port 179 unreachable"
+        if p.get("reachable"):
+            return "port 179 reachable"
+        return "port 179 unreachable" + (f" ({p['reason']})" if p.get("reason") else "")
     if tool_id == "config":
         if not p.get("has_baseline"):
             return "running config read (no baseline)"
-        return "drifted from baseline" if p.get("drifted") else "matches baseline"
+        if not p.get("drifted"):
+            return "matches baseline"
+        return "drifted from baseline" + (f" ({p['severity']})" if p.get("severity") else "")
+    if tool_id == "route_to_peer":
+        if not p.get("has_route"):
+            return "no route to the peer"
+        if p.get("is_default"):
+            return "only the default route matches the peer"
+        return f"route {p.get('prefix')} via {p.get('protocol')} on {p.get('interface') or p.get('next_hop')}"
+    if tool_id == "prefix_list":
+        ev = p.get("evaluation") or {}
+        denied = [n for n, e in ev.items() if e.get("action") == "deny"]
+        return f"{p.get('count', 0)} list(s)" + (f", denying {p.get('prefix')}: {', '.join(denied)}" if denied else "")
     if tool_id == "route_table":
         if p.get("in_table") is False:
             return f"{p.get('prefix')} not in the BGP table"

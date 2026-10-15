@@ -1,10 +1,14 @@
 """Triage: read the question before any tool runs (keywords in rules mode, the LLM in agent mode)."""
 import json
 import logging
+import re
 
 from analyzer import llm_client, prompts
 
 log = logging.getLogger(__name__)
+
+PREFIX_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\b")
+ROUTE_WORD_RE = re.compile(r"\broutes?\b|\bprefix(?:es)?\b|\bpaths?\b|\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}")
 
 
 def triage(question: str) -> str:
@@ -16,6 +20,34 @@ def triage(question: str) -> str:
     if any(w in q for w in ("config", "mismatch", "remote-as", "as number")):
         return "config_check"
     return "bgp_state_check"   # default: start from BGP session state
+
+
+def extract_prefix(question: str) -> str | None:
+    """The first prefix (a.b.c.d/len) in the question, if any."""
+    m = PREFIX_RE.search(question)
+    return m.group(1) if m else None
+
+
+def route_intent(question: str) -> str | None:
+    """The route rule a question is about, or None for a session question.
+
+    The rules engine still checks the session first (bgp_state) and only moves
+    to this rule when the session is Established.
+    """
+    q = question.lower()
+    about_routes = bool(ROUTE_WORD_RE.search(q))
+    if re.search(r"best[ -]?path|which path|path selection|preferred path|tie-?break"
+                 r"|why\b.*\b(?:prefers?|preferred|chooses?|chosen|selects?|selected|picks?|picked|wins?|winning)\b", q):
+        return "route_best_path_selection"
+    if about_routes and re.search(r"not (?:being )?(?:selected|chosen|preferred|used|best|installed|received|"
+                                  r"learn(?:ed|t)?|showing|there|in the table)|isn'?t (?:selected|chosen|there)"
+                                  r"|missing|disappear|gone|lost|filtered|dropped|withdrawn", q):
+        return "route_received_not_selected"
+    if re.search(r"route-?map|route map|prefix-?list|prefix list|filter-?list", q):
+        return "route_map_check"
+    if about_routes or re.search(r"local[- ]?pref|\bmed\b|as[- ]?path|next[- ]?hop|\bweight\b", q):
+        return "route_leading_case"
+    return None
 
 
 def llm_triage(question: str, host: str, peer: str | None, registry) -> dict:

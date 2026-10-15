@@ -16,7 +16,16 @@ FAULT_CLASSES = {
     "route_filtered": "a route-map or prefix-list denies the route or changes its attributes",
     "route_not_received": "the peer doesn't advertise the prefix to this router",
     "route_as_intended": "the route is selected or filtered exactly as the policy intends; not a fault",
-    "other": "a cause not listed here (MD5, router-id, multihop/TTL, update-source, a fault on the peer...)",
+    # added with rulebook v3 (the rules engine can now name these)
+    "no_route_to_peer": "this router has no route to the peer's address (interface IP missing/wrong, no route to a loopback)",
+    "peer_not_listening": "the peer refuses TCP 179: bgpd is not running there, or a firewall REJECTs it",
+    "router_id_conflict": "both routers use the same BGP router-id (Bad BGP Identifier)",
+    "capability_mismatch": "the OPEN exchange fails on capabilities (Unsupported Capability)",
+    "hold_timer_expired": "keepalives don't arrive in time (latency/loss, or timers too short)",
+    "max_prefix_exceeded": "the peer sent more prefixes than the maximum-prefix limit allows",
+    "afi_not_negotiated": "the session is up but no address family was negotiated (neighbor not activated)",
+    "auth_mismatch": "TCP-MD5 password missing on one side or different on each",
+    "other": "a cause not listed here (multihop/TTL, update-source, a fault on the peer...)",
 }
 
 STATES = ["Established", "Active", "Connect", "Idle", "OpenSent", "OpenConfirm", "none"]

@@ -1,20 +1,47 @@
 """The reasoning loop: ask the rulebook, call the tool, decide, escalate.
 
 Escalation order: rule chain -> ML engine -> LLM -> human.
+
+How the rule chain moves (rules mode):
+  - bgp_state runs first. Its result picks the next rule: the rule for the
+    state it saw (bgp_state_active, bgp_state_idle, ...), or, for a question
+    about routes on an Established session, the route rule triage chose.
+    Without this jump every case walked bgp_state -> interface -> tcp -> config
+    whatever the state was, and the per-state rules were never used.
+  - A tool that already ran is not run again (the bgp_state_* rules reuse the
+    first bgp_state result), and no intent is visited twice.
+  - Some results are not proof on their own (TCP/179 times out, a prefix is
+    missing). They are kept as a tentative finding and the chain continues;
+    if nothing more specific turns up, the chain ends on that finding instead
+    of handing the case to ML/LLM with nothing.
 """
+import ipaddress
 import json
 import logging
+import re
 
 from analyzer import llm_escalation, ml_engine
 from analyzer.tool_registry import ToolRegistry
-from analyzer.triage import triage
+from analyzer.triage import extract_prefix, route_intent, triage
 from analyzer.verdict import Verdict
 
 ML_CONFIDENCE_THRESHOLD = 0.7   # below this, the ML guess goes to the LLM as a hint
+FLAP_LINK_DOWNS = 3             # link_downs on the peer-facing interface that count as flapping
 
 log = logging.getLogger(__name__)
 
 CONNECT_ERRORS = ("NoValidConnectionsError", "Unable to connect", "timed out", "AuthenticationException")
+
+# bgp_state result -> the rule for that state
+STATE_INTENT = {
+    "Idle": "bgp_state_idle",
+    "Connect": "bgp_state_connect",
+    "Active": "bgp_state_active",
+    "OpenSent": "bgp_state_opensent",
+    "OpenConfirm": "bgp_state_openconfirm",
+    "Established": "bgp_state_established",
+    "unknown": "bgp_neighbor_detail",   # not in the summary: read the neighbor (likely not configured)
+}
 
 # Hints are for the LLM agent; the rule chain ignores them.
 STATE_HINTS = {
@@ -26,74 +53,446 @@ STATE_HINTS = {
              "The session keeps failing and restarting, usually because the OPEN exchange is rejected "
              "(remote-as mismatch, router-id conflict) or the peer doesn't have this router configured. "
              "Call bgp_neighbor next: it shows the NOTIFICATION behind it."),
-    "OpenSent": "OpenSent: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities, MD5).",
-    "OpenConfirm": "OpenConfirm: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities, MD5).",
+    "OpenSent": "OpenSent: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities).",
+    "OpenConfirm": ("OpenConfirm: the OPENs were exchanged but no KEEPALIVE arrived (hold timer, latency, "
+                    "or the peer resets after the OPEN). Call bgp_neighbor next."),
     "unknown": ("The peer is not listed in `show bgp summary`, so it is most likely not configured on this router. "
                 "Check the config for a `neighbor <peer> remote-as` line."),
 }
-REASON_HINTS = {
-    "Admin": ("Idle (Admin): the neighbor is administratively shut down on THIS router "
-              "(`neighbor {peer} shutdown`). FRR fix on this router: "
-              "`router bgp <local-asn>` then `no neighbor {peer} shutdown`."),
-    "PfxCt": "Idle (PfxCt): the peer sent more prefixes than the configured maximum-prefix allows.",
+
+# best_reason from `show ip bgp <prefix>` -> (path attribute, how the winner compares)
+BEST_REASON_ATTR = {
+    "Weight": ("weight", "higher weight"),
+    "Local Pref": ("local_pref", "higher local-preference"),
+    "AS Path": ("as_path_length", "shorter AS-path"),
+    "Origin": ("origin", "better origin (i < e < ?)"),
+    "MED": ("metric", "lower MED"),
+    "Router ID": ("router_id", "lower router-id"),
+}
+ROUTE_MAP_SETS = {   # path attribute -> words a route-map set clause uses for it
+    "weight": ("weight",),
+    "local_pref": ("local-preference",),
+    "as_path_length": ("as-path",),
+    "origin": ("origin",),
+    "metric": ("metric",),
 }
 
 
 def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
-    """decision: root_cause | healthy | continue, plus cause/fix/fault_class when decided."""
+    """decision: root_cause | healthy | continue, plus cause/fix/fault_class when decided.
+
+    A "continue" may also carry:
+      hint                  - text for the LLM agent
+      suggested_next_intent - the rule the chain should go to next (rules mode follows it)
+      tentative             - {fault_class, cause, fix}: the answer if nothing better turns up
+    """
     if not result.get("success", True):
         error = result.get("error") or ""
         if any(e in error for e in CONNECT_ERRORS):
-            return {"decision": "continue",
-                    "hint": "SSH to the router failed. Every device tool will fail the same way, so "
-                            "the fault is reaching the router itself (fault_class device_unreachable)."}
+            return {"decision": "root_cause", "fault_class": "device_unreachable",
+                    "cause": f"The diagnostic tools could not reach router {ctx.get('host')}: {error}",
+                    "fix": "Check the container is running, its management IP, and the SSH/REST "
+                           "credentials the device client uses. Until then nothing on the router can be checked."}
         return {"decision": "continue"}
 
     parsed = result.get("parsed", {})
+    peer = ctx.get("peer")
 
     if tool_id == "bgp_state":
-        state = parsed.get("queried_peer_state")
-        if state == "Established":
-            return {"decision": "healthy", "fault_class": "healthy",
-                    "cause": f"BGP peer {ctx.get('peer')} is Established",
-                    "fix": "No action needed — the session is up."}
-        hint = REASON_HINTS.get(parsed.get("queried_peer_state_reason")) or STATE_HINTS.get(state)
-        if hint:
-            hint = hint.format(peer=ctx.get("peer") or "<peer>")
-        return {"decision": "continue", **({"hint": hint} if hint else {})}
+        return _bgp_state_finding(parsed, ctx)
 
     if tool_id == "bgp_neighbor":
         return _neighbor_finding(parsed, ctx)
 
+    if tool_id == "interface":
+        return _interface_finding(parsed, ctx)
+
+    if tool_id == "route_to_peer":
+        return _route_to_peer_finding(parsed, ctx)
+
+    if tool_id == "tcp_port":
+        if parsed.get("reachable") is False:
+            reason = parsed.get("reason")
+            if reason == "refused":
+                return {"decision": "root_cause", "fault_class": "peer_not_listening",
+                        "cause": f"{peer} refuses TCP connections on port 179: bgpd is not running on the peer, "
+                                 f"or a firewall there REJECTs port 179",
+                        "fix": "On the peer: check bgpd is running (bgpd=yes in /etc/frr/daemons, then restart "
+                               "FRR) and that no iptables REJECT rule covers port 179."}
+            if reason == "no_route":
+                return {"decision": "root_cause", "fault_class": "no_route_to_peer",
+                        "cause": f"This router has no route to {peer}, so TCP/179 can't be opened",
+                        "fix": "Fix the peer-facing interface address or add a route to the peer."}
+            return {"decision": "continue",
+                    "hint": f"TCP/179 to {peer} gets no answer ({reason or 'unreachable'}). With the interface and "
+                            f"route fine, packets are being dropped: a firewall/ACL on either router, or link loss.",
+                    "tentative": {
+                        "fault_class": "tcp_unreachable",
+                        "cause": f"TCP/179 to {peer} gets no answer although the interface and the route to it are "
+                                 f"fine: a firewall/ACL is dropping port 179 (on either router), or the link is "
+                                 f"losing packets",
+                        "fix": f"Check `iptables -L -n` on both routers for rules covering port 179, and the link "
+                               f"for loss (`ping -c 20 {peer}`)."}}
+        return {"decision": "continue"}
+
+    if tool_id == "config":
+        return _config_finding(parsed, result.get("raw_output") or "", ctx)
+
     if tool_id == "route_table":
-        return {"decision": "continue", "hint": _route_table_hint(parsed)}
+        return _route_table_finding(parsed, ctx)
 
     if tool_id == "route_map":
-        return {"decision": "continue", "hint": _route_map_hint(parsed)}
+        return _route_map_finding(parsed, ctx)
 
-    if tool_id == "interface":
-        down = [n for n, i in parsed.get("interfaces", {}).items()
-                if i.get("link_state") == "down" or i.get("admin_state") == "down"]
+    if tool_id == "prefix_list":
+        return _prefix_list_finding(parsed, ctx)
+
+    return {"decision": "continue"}
+
+
+# --- bgp_state -----------------------------------------------------------------
+
+def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
+    peer = ctx.get("peer") or "<peer>"
+    state = parsed.get("queried_peer_state")
+    reason = parsed.get("queried_peer_state_reason")
+
+    if state == "Established":
+        if reason in ("Policy", "NoNeg") and not ctx.get("route_question"):
+            # the session itself is up; for a session question that is the answer
+            why = ("no route policy for this eBGP peer ((Policy): bgp ebgp-requires-policy)" if reason == "Policy"
+                   else "no address family negotiated (NoNeg: neighbor not activated)")
+            return {"decision": "healthy", "fault_class": "healthy",
+                    "cause": f"BGP peer {peer} is Established, but it exchanges no routes: {why}",
+                    "fix": "No action needed for the session. If routes from this peer are expected, "
+                           + ("add a route-map in/out for the neighbor." if reason == "Policy"
+                              else f"`neighbor {peer} activate` under address-family ipv4 unicast.")}
+        if reason == "Policy":
+            return {"decision": "root_cause", "fault_class": "route_filtered",
+                    "cause": f"The session with {peer} is up but FRR exchanges no routes with it: it is an eBGP "
+                             f"peer with no route policy ((Policy) in show bgp summary; bgp ebgp-requires-policy)",
+                    "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} route-map <MAP> in "
+                           f"(and out), or `no bgp ebgp-requires-policy` if no policy is wanted."}
+        if reason == "NoNeg":
+            return {"decision": "root_cause", "fault_class": "afi_not_negotiated",
+                    "cause": f"The session with {peer} is up but no address family was negotiated (NoNeg): "
+                             f"IPv4 unicast is not activated for the neighbor, so no prefixes are exchanged",
+                    "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} activate"}
+        if ctx.get("route_question"):
+            target = ctx.get("route_intent") or "route_received_not_selected"
+            return {"decision": "continue", "suggested_next_intent": target,
+                    "hint": f"The session with {peer} is up; the question is about routes, so continue with {target}."}
+        return {"decision": "healthy", "fault_class": "healthy",
+                "cause": f"BGP peer {peer} is Established",
+                "fix": "No action needed — the session is up."}
+
+    if reason == "Admin":
+        return {"decision": "root_cause", "fault_class": "neighbor_shutdown",
+                "cause": f"Neighbor {peer} is administratively shut down on this router (Idle (Admin))",
+                "fix": f"router bgp <local-asn> / no neighbor {peer} shutdown"}
+    if reason == "PfxCt":
+        return {"decision": "root_cause", "fault_class": "max_prefix_exceeded",
+                "cause": f"{peer} sent more prefixes than the maximum-prefix limit allows, so this router tore the "
+                         f"session down (Idle (PfxCt))",
+                "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} maximum-prefix "
+                       f"<higher limit>, then `clear bgp {peer}`"}
+
+    hint = STATE_HINTS.get(state)
+    out = {"decision": "continue", "suggested_next_intent": STATE_INTENT.get(state)}
+    if hint:
+        out["hint"] = hint
+    return out
+
+
+# --- interface / route to peer ---------------------------------------------------
+
+def _addresses(info: dict) -> list[str]:
+    return info.get("ip_addresses") or ([info["ip_address"]] if info.get("ip_address") else [])
+
+
+def peer_facing_interface(interfaces: dict, peer: str | None) -> str | None:
+    """The interface with the longest-prefix address whose subnet contains the peer."""
+    try:
+        peer_ip = ipaddress.ip_address(peer) if peer else None
+    except ValueError:
+        return None
+    if peer_ip is None:
+        return None
+    best, best_len = None, -1
+    for name, info in interfaces.items():
+        for addr in _addresses(info):
+            try:
+                net = ipaddress.ip_interface(addr).network
+            except ValueError:
+                continue
+            if peer_ip.version == net.version and peer_ip in net and net.prefixlen > best_len:
+                best, best_len = name, net.prefixlen
+    return best
+
+
+def _interface_finding(parsed: dict, ctx: dict) -> dict:
+    interfaces = parsed.get("interfaces", {})
+    peer = ctx.get("peer")
+    down = [n for n, i in interfaces.items()
+            if i.get("link_state") == "down" or i.get("admin_state") == "down"]
+    ctx["_down_ifaces"] = down
+
+    if not peer:
+        # no peer to relate interfaces to: any down interface is the best lead
         if down:
             return {"decision": "root_cause", "fault_class": "interface_down",
                     "cause": f"Interface(s) down: {', '.join(down)}",
                     "fix": f"Bring it up: conf t / interface {down[0]} / no shutdown"}
         return {"decision": "continue"}
 
-    if tool_id == "tcp_port":
-        if parsed.get("reachable") is False:
-            return {"decision": "root_cause", "fault_class": "tcp_unreachable",
-                    "cause": "TCP port 179 to the peer is not reachable",
-                    "fix": "Check routing/ACLs so the peer is reachable on port 179."}
+    facing = peer_facing_interface(interfaces, peer)
+    if facing is None:
+        return {"decision": "continue",
+                "hint": f"No interface has an address on {peer}'s subnet: the address is missing or wrong, or the "
+                        f"peer is a loopback reached through a route. Check route_to_peer."
+                        + (f" Down interfaces: {', '.join(down)}." if down else "")}
+
+    info = interfaces[facing]
+    if info.get("admin_state") == "down":
+        return {"decision": "root_cause", "fault_class": "interface_down",
+                "cause": f"Interface {facing}, the one towards {peer}, is administratively down",
+                "fix": f"conf t / interface {facing} / no shutdown (or `ip link set {facing} up`)"}
+    if info.get("link_state") == "down":
+        return {"decision": "root_cause", "fault_class": "interface_down",
+                "cause": f"Interface {facing}, the one towards {peer}, is admin up but has no link "
+                         f"(line protocol down): the cable, the link, or the peer's end of it is down",
+                "fix": f"Check the peer's interface on this link (`show interface` on {peer}) and the cabling, "
+                       f"and bring the far end up."}
+    hint = f"Interface {facing} towards {peer} is up/up ({', '.join(_addresses(info))})."
+    downs = info.get("link_downs")
+    if downs is not None and downs >= FLAP_LINK_DOWNS:
+        hint += f" It has gone down {downs} times: the link may be flapping (see bgp_session_flapping)."
+    return {"decision": "continue", "hint": hint}
+
+
+def _route_to_peer_finding(parsed: dict, ctx: dict) -> dict:
+    peer = ctx.get("peer")
+    if parsed.get("has_route") is None:
         return {"decision": "continue"}
+    if parsed.get("has_route") and not parsed.get("is_default"):
+        return {"decision": "continue",
+                "hint": f"Route to {peer}: {parsed.get('prefix')} via {parsed.get('protocol')} on "
+                        f"{parsed.get('interface') or parsed.get('next_hop')}."}
 
-    if tool_id == "config":
-        if parsed.get("has_baseline") and parsed.get("drifted"):
+    down = ctx.get("_down_ifaces") or []
+    if down:
+        return {"decision": "root_cause", "fault_class": "interface_down",
+                "cause": f"This router has no route to {peer} and interface(s) {', '.join(down)} are down; "
+                         f"the peer is most likely reached over one of them",
+                "fix": f"Bring the interface up: conf t / interface {down[0]} / no shutdown"}
+    via_default = (f" except the default route via {parsed.get('interface') or parsed.get('next_hop')}"
+                   if parsed.get("is_default") else "")
+    return {"decision": "root_cause", "fault_class": "no_route_to_peer",
+            "cause": f"This router has no route to {peer}{via_default}: no interface has an address on the "
+                     f"peer's subnet (the address is missing or wrong) and no static or IGP route covers it",
+            "fix": f"Put the right address on the peer-facing interface (`ip addr add <addr>/<len> dev <iface>` "
+                   f"or `interface <iface> / ip address <addr>/<len>`), or, for loopback peering, add a route "
+                   f"(`ip route {peer}/32 <next-hop>`)."}
+
+
+# --- config ---------------------------------------------------------------------------
+
+ROUTE_MAP_DEF_RE = re.compile(r"^route-map (?P<name>\S+) (?:permit|deny) \d+", re.MULTILINE)
+
+
+def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
+    peer = ctx.get("peer")
+
+    undefined = _undefined_route_maps(running, peer)
+    if undefined:
+        name, direction = undefined[0]
+        return {"decision": "root_cause", "fault_class": "route_filtered",
+                "cause": f"Neighbor {peer} uses route-map {name} ({direction}), but no route-map {name} is "
+                         f"defined: FRR then denies every route in that direction",
+                "fix": f"Define route-map {name}, or point the neighbor at an existing one: router bgp <local-asn> / "
+                       f"address-family ipv4 unicast / neighbor {peer} route-map <existing> {direction}"}
+
+    if parsed.get("has_baseline") and parsed.get("drifted"):
+        severity = parsed.get("severity")
+        if severity == "cosmetic":
+            return {"decision": "continue",
+                    "hint": "The config differs from the baseline only in descriptions/comments: not a fault."}
+        if severity != "none":   # "bgp", or None from an older config tool
+            changes = parsed.get("relevant_changes") or [
+                l for l in parsed.get("diff", []) if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+            shown = "; ".join(l.strip() for l in changes[:5]) + (" ..." if len(changes) > 5 else "")
             return {"decision": "root_cause", "fault_class": "config_drift",
-                    "cause": "Running config has drifted from the baseline",
-                    "fix": "Review the diff and restore the correct BGP settings."}
-        return {"decision": "continue", "hint": _neighbor_facts(result.get("raw_output") or "", ctx.get("peer"))}
+                    "cause": f"Running config has drifted from the baseline: {shown}",
+                    "fix": "Review the diff and restore the correct BGP settings (lines starting '-' are the "
+                           "baseline, '+' the running config)."}
 
+    if peer and running and not any(l.strip().startswith(f"neighbor {peer} ") for l in running.splitlines()):
+        return {"decision": "root_cause", "fault_class": "neighbor_missing",
+                "cause": f"The running config has no `neighbor {peer}` lines: the neighbor is not configured "
+                         f"on this router",
+                "fix": f"router bgp <local-asn> / neighbor {peer} remote-as <peer-asn>"}
+
+    out = {"decision": "continue", "hint": _neighbor_facts(running, peer)}
+    lines = [l.strip() for l in running.splitlines() if peer and l.strip().startswith(f"neighbor {peer} ")]
+    if any(" password " in f" {l} " for l in lines):
+        out["tentative"] = {
+            "fault_class": "auth_mismatch",
+            "cause": f"A TCP-MD5 password is configured for {peer}. If the peer has no password or a different "
+                     f"one, the kernel silently drops the TCP segments and the session stays Active/Connect",
+            "fix": f"Configure the same `neighbor <addr> password <secret>` on both routers (or remove it on both)."}
+    elif any(" ttl-security " in f" {l} " for l in lines):
+        out["tentative"] = {
+            "fault_class": "config_drift",
+            "cause": f"ttl-security (GTSM) is configured for {peer}. If the peer does not send TTL 255, this "
+                     f"router drops its packets and the session never forms",
+            "fix": f"Configure `neighbor <addr> ttl-security hops <n>` on both routers, or remove it on both."}
+    return out
+
+
+def _undefined_route_maps(running: str, peer: str | None) -> list[tuple[str, str]]:
+    if not (peer and running):
+        return []
+    defined = {m["name"] for m in ROUTE_MAP_DEF_RE.finditer(running)}
+    refs = re.findall(rf"^\s*neighbor {re.escape(peer)} route-map (\S+) (in|out)\s*$", running, re.MULTILINE)
+    return [(name, direction) for name, direction in refs if name not in defined]
+
+
+# --- routes ---------------------------------------------------------------------------
+
+def _value(path: dict, attr: str):
+    v = path.get(attr)
+    return 100 if attr == "local_pref" and v is None else v   # blank LocPrf = default 100
+
+
+def _best_path_cause(p: dict) -> tuple[str, str | None]:
+    """(sentence explaining the winner, deciding attribute or None)."""
+    best, others = p["best_path"], p.get("paths_not_selected", [])
+    prefix = p.get("prefix") or best.get("network")
+    via = f"{best['next_hop']}" + (f" (from {best['from_peer']})" if best.get("from_peer") else "")
+    reason = best.get("best_reason")
+    attr, how = BEST_REASON_ATTR.get(reason, (None, None))
+    if not others:
+        return f"{prefix} has one path, via {via}; it is the best path because it is the only one", None
+    text = f"The best path for {prefix} is via {via}"
+    if reason:
+        text += f": it wins on {reason}"
+    if attr:
+        losers = ", ".join(f"{_value(o, attr)} via {o['next_hop']}" for o in others)
+        text += f" ({how}: {_value(best, attr)} vs {losers})"
+    invalid = [o for o in others if o.get("valid") is False or o.get("next_hop_reachable") is False]
+    multipath = [o for o in others if o.get("multipath")]
+    text += f"; the other {len(others)} path(s) lose at that step of the best-path order"
+    if multipath:
+        text += f" ({len(multipath)} still installed as multipath)"
+    if invalid:
+        text += f"; {len(invalid)} path(s) are not valid (next hop inaccessible)"
+    return text, attr
+
+
+def _route_table_finding(p: dict, ctx: dict) -> dict:
+    prefix = p.get("prefix")
+    if p.get("in_table") is False:
+        ctx["_route_missing"] = prefix
+        return {"decision": "continue",
+                "hint": (f"This router has no route for {prefix}: the peer doesn't advertise it, or an inbound "
+                         f"route-map/prefix-list filters it. Check route_map: a deny entry with invoked > 0 points "
+                         f"at filtering."),
+                "tentative": {
+                    "fault_class": "route_not_received",
+                    "cause": f"This router has no route for {prefix} and no filter on it was found: the peer "
+                             f"most likely does not advertise it",
+                    "fix": f"On the peer, check `show ip bgp {prefix}` and its `network`/redistribute statement "
+                           f"and outbound policy."}}
+    best = p.get("best_path")
+    paths = p.get("paths") or []
+    if prefix and paths and not best:
+        bad = [x for x in paths if x.get("valid") is False or x.get("next_hop_reachable") is False]
+        hops = ", ".join(sorted({x["next_hop"] for x in bad})) or "?"
+        return {"decision": "root_cause", "fault_class": "route_not_selected",
+                "cause": f"{prefix} is received but no path is valid: next hop {hops} is not reachable from this "
+                         f"router (typical for iBGP without next-hop-self)",
+                "fix": "On the router that passes the route over iBGP: router bgp <asn> / address-family ipv4 "
+                       "unicast / neighbor <ibgp-peer> next-hop-self; or make the next hop reachable (IGP/static)."}
+    if prefix and best:
+        text, attr = _best_path_cause(p)
+        finding = {"fault_class": "route_not_selected" if p.get("paths_not_selected") else "route_as_intended",
+                   "cause": text,
+                   "fix": ("If a different path should win, change the deciding attribute (a route-map set clause, "
+                           "neighbor weight, or the peer's outbound policy); otherwise this is as intended.")}
+        if attr in ROUTE_MAP_SETS:
+            # a route-map may have set the deciding attribute: let route_map_check name it
+            ctx["_route_finding"] = {**finding, "attr": attr}
+            return {"decision": "continue", "hint": text + ". Check route_map for a set clause on it.",
+                    "tentative": finding}
+        return {"decision": "root_cause", **finding}
+    return {"decision": "continue", "hint": _route_table_hint(p)}
+
+
+def _route_map_finding(p: dict, ctx: dict) -> dict:
+    maps = p.get("route_maps", [])
+    ctx["_rm_prefix_lists"] = sorted({c.split()[-1] for m in maps for c in m.get("match_clauses", [])
+                                      if "prefix-list" in c})
+    denies = [m for m in maps if m["action"] == "deny" and m.get("invoked")]
+    if denies:
+        what = ", ".join(f"{m['name']} seq {m['sequence']} ({'; '.join(m['match_clauses']) or 'matches everything'}, "
+                         f"{m['invoked']} match(es))" for m in denies)
+        return {"decision": "root_cause", "fault_class": "route_filtered",
+                "cause": f"Route-map deny entries are filtering routes: {what}",
+                "fix": "If these routes should be accepted, narrow the deny entry's match clause, move it after "
+                       "the permit, or remove it; if the filtering is intended this is route_as_intended."}
+
+    found = ctx.get("_route_finding")
+    if found:
+        words = ROUTE_MAP_SETS.get(found["attr"], ())
+        setters = [f"{m['name']} seq {m['sequence']} sets {'; '.join(m['set_clauses'])}"
+                   for m in maps if any(w in c for c in m.get("set_clauses", []) for w in words)]
+        finding = {k: v for k, v in found.items() if k != "attr"}
+        if setters:
+            finding["cause"] += ". The deciding value comes from route-map " + ", ".join(setters)
+            finding["fix"] = ("Change or remove that set clause (or the route-map on the neighbor) if a "
+                              "different path should win; otherwise this is as intended.")
+        else:
+            finding["cause"] += (". No route-map on this router sets it: look at neighbor weight here, "
+                                 "or the peer's outbound policy (e.g. AS-path prepend, MED)")
+        return {"decision": "root_cause", **finding}
+
+    if ctx.get("_route_missing"):
+        catch_all = any(m["action"] == "permit" and not m.get("match_clauses") for m in maps)
+        if maps and not catch_all:
+            names = sorted({m["name"] for m in maps})
+            return {"decision": "continue",
+                    "hint": f"Route-map(s) {', '.join(names)} have no catch-all permit: a route matching none of "
+                            f"their entries hits the implicit deny.",
+                    "tentative": {
+                        "fault_class": "route_filtered",
+                        "cause": f"{ctx['_route_missing']} is missing and route-map(s) {', '.join(names)} have no "
+                                 f"catch-all permit entry: routes that match none of the entries are dropped by the "
+                                 f"implicit deny at the end",
+                        "fix": "Add a final `route-map <name> permit <seq>` with no match clause if other routes "
+                               "should pass, or widen the match clause."}}
+    return {"decision": "continue", "hint": _route_map_hint(p)}
+
+
+def _prefix_list_finding(p: dict, ctx: dict) -> dict:
+    prefix = p.get("prefix")
+    evaluation = p.get("evaluation") or {}
+    referenced = set(ctx.get("_rm_prefix_lists") or [])
+    hits = []
+    for name, ev in evaluation.items():
+        if ev["action"] != "deny":
+            continue
+        if ev["implicit"] and name not in referenced:
+            continue   # an unrelated list that simply doesn't mention the prefix
+        hits.append((name, ev))
+    if prefix and hits:
+        name, ev = hits[0]
+        how = (f"entry seq {ev['sequence']} denies it" if not ev["implicit"] else
+               "no entry matches it, so the implicit deny drops it (an entry without le/ge only matches "
+               "that exact prefix length)")
+        return {"decision": "root_cause", "fault_class": "route_filtered",
+                "cause": f"prefix-list {name} filters {prefix}: {how}",
+                "fix": f"Fix prefix-list {name}: permit {prefix} (e.g. add `le <len>` to the covering entry) or "
+                       f"remove the deny entry, then `clear bgp <peer> soft in`."}
     return {"decision": "continue"}
 
 
@@ -124,6 +523,8 @@ def _route_map_hint(p: dict) -> str:
         parts.append("Entries that change attributes: " + ", ".join(sets) + ".")
     return " ".join(parts) or "No route-map entry denies routes or changes attributes."
 
+
+# --- bgp_neighbor ---------------------------------------------------------------------
 
 def _neighbor_finding(p: dict, ctx: dict) -> dict:
     peer = ctx.get("peer")
@@ -164,6 +565,32 @@ def _neighbor_finding(p: dict, ctx: dict) -> dict:
         return {"decision": "root_cause", "fault_class": "neighbor_shutdown",
                 "cause": f"{peer} has shut down its neighbor for this router",
                 "fix": f"{on_peer}: router bgp {remote_as} / no neighbor {me} shutdown"}
+    if "Bad BGP Identifier" in error:
+        rid = p.get("remote_router_id")
+        return {"decision": "root_cause", "fault_class": "router_id_conflict",
+                "cause": f"The OPEN from {peer} was rejected with Bad BGP Identifier: the two routers use the same "
+                         f"BGP router-id" + (f" ({rid})" if rid else ""),
+                "fix": "Give one of them a unique router-id: router bgp <asn> / bgp router-id <unique-id>"}
+    if "Unsupported Capability" in error:
+        return {"decision": "root_cause", "fault_class": "capability_mismatch",
+                "cause": f"The OPEN exchange with {peer} fails on capabilities (Unsupported Capability, "
+                         f"{'sent by this router' if sent else 'sent by the peer'}): one side requires a capability "
+                         f"the other doesn't offer (strict-capability-match / dont-capability-negotiate)",
+                "fix": f"Remove `neighbor ... strict-capability-match` or `dont-capability-negotiate` so both "
+                       f"sides negotiate the same capabilities."}
+    if "Hold Timer Expired" in error:
+        return {"decision": "root_cause", "fault_class": "hold_timer_expired",
+                "cause": f"The session with {peer} keeps being torn down because no KEEPALIVE arrives within the "
+                         f"hold time (Hold Timer Expired): high latency or packet loss on the link, or timers set "
+                         f"too short for it",
+                "fix": f"Check the link for loss/latency (`ping -c 20 {peer}`); restore default timers "
+                       f"(`no neighbor {peer} timers`) or raise them."}
+    if "Maximum Number of Prefixes Reached" in error:
+        return {"decision": "root_cause", "fault_class": "max_prefix_exceeded",
+                "cause": f"{peer} sent more prefixes than the maximum-prefix limit allows, so the session was "
+                         f"torn down",
+                "fix": f"router bgp {local_as} / address-family ipv4 unicast / neighbor {peer} maximum-prefix "
+                       f"<higher limit>, then `clear bgp {peer}`"}
 
     if p.get("connections_established") == 0:
         return {"decision": "continue",
@@ -192,6 +619,10 @@ def _neighbor_facts(running: str, peer: str | None) -> str:
     facts.append("and it IS shut down (`neighbor ... shutdown`)" if shut
                  else "and it is NOT shut down (no `shutdown` line)")
     hint = " ".join(facts) + "."
+    extras = [w for w in ("password", "ttl-security", "ebgp-multihop", "update-source", "timers",
+                          "maximum-prefix", "local-as") if any(f" {w} " in f" {l} " for l in lines)]
+    if extras:
+        hint += f" It also sets: {', '.join(extras)} (these must match the peer's side)."
     if shut:
         hint += (f" FRR fix on this router: `router bgp {local_as or '<local-asn>'}` then "
                  f"`no neighbor {peer} shutdown`.")
@@ -203,21 +634,48 @@ def _neighbor_facts(running: str, peer: str | None) -> str:
     return hint
 
 
+# --- the rule chain ---------------------------------------------------------------------
+
+def _args_for(registry: ToolRegistry, tool_id: str, ctx: dict) -> dict:
+    """Arguments the rule chain can fill in from the question (the LLM sets them in agent mode)."""
+    schema = registry.tools.get(tool_id, {}).get("args_schema", {})
+    args = {}
+    if "prefix" in schema and ctx.get("prefix"):
+        args["prefix"] = ctx["prefix"]
+    return args
+
+
 def diagnose(client, question: str, host: str, peer: str,
              use_ml: bool = True, use_llm: bool = True) -> Verdict:
-    intent = triage(question)
-    log.info("Triage: starting intent %s", intent)
-    ctx = {"host": host, "peer": peer}
+    r_intent = route_intent(question)
+    prefix = extract_prefix(question)
+    route_question = bool(r_intent or prefix)
+    # a route question still starts from the session: routes mean nothing on a down session
+    intent = "bgp_state_check" if route_question else triage(question)
+    log.info("Triage: starting intent %s (route question: %s, route intent %s, prefix %s)",
+             intent, route_question, r_intent, prefix)
+    ctx = {"host": host, "peer": peer, "question": question, "route_question": route_question,
+           "route_intent": r_intent or ("route_received_not_selected" if prefix else None), "prefix": prefix}
     registry = ToolRegistry.load(client)
     checked, evidence = [], []
+    visited, ran = set(), set()
+    tentative = None
 
-    while intent:
+    while intent and intent not in visited:
+        visited.add(intent)
         rule = client.get_rule(intent)
+        next_intent = rule.get("next_intent_on_fail")
         log.info("Rule %s: tools %s, next intent on fail %s", intent,
-                 [t["tool_id"] for t in rule["tools"]], rule.get("next_intent_on_fail"))
+                 [t["tool_id"] for t in rule["tools"]], next_intent)
         for tool in rule["tools"]:
             tool_id = tool["tool_id"]
-            result = registry.execute(client, tool_id, {}, ctx, evidence)
+            args = _args_for(registry, tool_id, ctx)
+            key = (tool_id, json.dumps(args, sort_keys=True))
+            if key in ran:
+                log.info("Tool %s already ran in this diagnosis; not running it again", tool_id)
+                continue
+            ran.add(key)
+            result = registry.execute(client, tool_id, args, ctx, evidence)
             if result.get("success", True):
                 log.info("Tool %s succeeded", tool_id)
             else:
@@ -238,19 +696,25 @@ def diagnose(client, question: str, host: str, peer: str,
             log.info("Rule decision after %s: %s%s", tool_id, outcome["decision"],
                      f" ({outcome['cause']})" if "cause" in outcome else "")
             if outcome["decision"] in ("root_cause", "healthy"):
-                verdict = Verdict(True, outcome["cause"], outcome["fix"], checked, evidence,
-                                  source="rules", fault_class=outcome["fault_class"])
-                if use_ml:   # second opinion, shown alongside the rule's answer
-                    ml = ml_engine.predict(evidence, peer)
-                    log.info("ML second opinion: %s (%.2f)", ml.label, ml.confidence)
-                    verdict.ml_prediction = ml.to_dict()
-                return verdict
-        intent = rule.get("next_intent_on_fail")   # escalate
+                return _rules_verdict(outcome, checked, evidence, peer, use_ml)
+            if outcome.get("tentative"):
+                tentative = outcome["tentative"]
+                log.info("Tentative finding after %s: %s", tool_id, tentative["fault_class"])
+            if outcome.get("suggested_next_intent"):
+                next_intent = outcome["suggested_next_intent"]
+                log.info("Result of %s points at intent %s", tool_id, next_intent)
+        intent = next_intent   # escalate
         if intent:
             log.info("Rule unresolved; escalating to intent %s", intent)
 
-    # Rule chain exhausted -> ML engine
     log.info("Rule chain exhausted without a root cause")
+    if tentative:
+        log.info("Concluding on the tentative finding %s", tentative["fault_class"])
+        verdict = _rules_verdict({"decision": "root_cause", **tentative}, checked, evidence, peer, use_ml)
+        verdict.notes.append("No rule was conclusive; this is the most specific finding the chain made")
+        return verdict
+
+    # Rule chain exhausted -> ML engine
     ml = ml_engine.predict(evidence, peer) if use_ml else None
     if not ml:
         log.info("ML engine skipped (--no-ml)")
@@ -285,3 +749,13 @@ def diagnose(client, question: str, host: str, peer: str,
                    source="llm", confidence=llm["confidence"],
                    ml_prediction=verdict.ml_prediction, next_checks=llm["next_checks"],
                    notes=[f"Diagnosed by {llm['model']}"])
+
+
+def _rules_verdict(outcome: dict, checked: list, evidence: list, peer: str, use_ml: bool) -> Verdict:
+    verdict = Verdict(True, outcome["cause"], outcome["fix"], checked, evidence,
+                      source="rules", fault_class=outcome["fault_class"])
+    if use_ml:   # second opinion, shown alongside the rule's answer
+        ml = ml_engine.predict(evidence, peer)
+        log.info("ML second opinion: %s (%.2f)", ml.label, ml.confidence)
+        verdict.ml_prediction = ml.to_dict()
+    return verdict

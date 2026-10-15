@@ -172,7 +172,7 @@ final verdict. If a run crashes, the traceback is in the log too. Use
 The first run trains the ML model (about a second) and saves it to
 `analyzer/models/`. Later runs reuse it.
 
-## Step 8 — Inject a fault the rules miss (neighbor shut down)
+## Step 8 — Inject a fault (neighbor shut down)
 
 Shut the neighbor down on router1:
 
@@ -190,23 +190,23 @@ python3 -m analyzer.run "My BGP peer is stuck at active state" \
 The agent sees `Idle (Admin)` (not `Active` as the question says) and
 concludes `neighbor_shutdown`, sometimes after checking `config`.
 
-With `--mode rules` it walks the whole chain (`bgp_state → interface → tcp_port → config`). None
-of the rules fire: the interfaces are up, port 179 is reachable, and there's
-no config baseline to diff against. The ML engine then picks up the
-`Idle (Admin)` state and the `neighbor ... shutdown` line in the running
-config:
+With `--mode rules` the rule chain decides on the first tool: `bgp_state`
+shows `Idle (Admin)`, which the rule book treats as a shut-down neighbor:
 
 ```
 Resolved:      True
-Root cause:    Neighbor 172.20.20.3 is administratively shut down
+Root cause:    Neighbor 172.20.20.3 is administratively shut down on this router (Idle (Admin))
 Suggested fix: router bgp <local-asn> / no neighbor 172.20.20.3 shutdown
-Decided by:    ml (confidence 1.00)
-Tools checked: bgp_state -> interface -> tcp_port -> config
+Decided by:    rules
+Tools checked: bgp_state
 Fault class:   neighbor_shutdown
 ```
 
-Run it with `--no-llm --no-ml` to compare: the rules alone report
-"No root cause found by the rule chain."
+(Before rulebook v3 the chain always walked `bgp_state → interface → tcp_port →
+config` and found nothing here, leaving the case to the ML engine. Now
+`bgp_state` picks the rule for the state it sees, and a state that isn't
+Established reads `bgp_neighbor` first, which names most OPEN/NOTIFICATION
+faults directly.)
 
 Undo the fault:
 
