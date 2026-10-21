@@ -127,8 +127,11 @@ class Investigation:
             if self.registry.tools[tool_id]["kind"] == "internal":
                 key += (len(self._device_evidence()),)
             if key in self.calls:
+                untried = [t for t in self.registry.tools if t not in self.checked
+                           and self.registry.tools[t]["kind"] == "device"]
                 raise ToolCallError(f"{tool_id} was already called with these args in step "
-                                    f"{self.calls[key]}; use that result")
+                                    f"{self.calls[key]}; use that result. Tools not called yet: "
+                                    f"{', '.join(untried) or 'none'}")
             if (tool_id != FIRST_TOOL and FIRST_TOOL in self.registry.tools
                     and FIRST_TOOL not in self.checked):
                 raise ToolCallError(f"call {FIRST_TOOL} first")
@@ -141,6 +144,12 @@ class Investigation:
         finding = rules_engine.evaluate(tool_id, result, self.ctx)
         if finding["decision"] == "continue" and "hint" not in finding:
             finding["suggested_next_intent"] = self.registry.next_intent_after(tool_id)
+        if finding.get("suggested_next_intent"):
+            # bgp_state points at bgp_state_<state>, whose only tool is bgp_state again: the model
+            # followed it, got rejected as a duplicate and was forced to conclude. Skip to the first
+            # intent with a tool that hasn't run yet.
+            finding["suggested_next_intent"] = self._next_new_intent(finding["suggested_next_intent"],
+                                                                     self.checked + [tool_id])
         elif finding["decision"] == "healthy":
             finding["note"] = ("The session is up. If the question is about the session, conclude; "
                                "if it is about routes or prefixes, continue with route_table.")
@@ -162,6 +171,16 @@ class Investigation:
                            "tool": tool_id, "args": args, "summary": summary,
                            "result": result, "rule_finding": finding})
         return finding
+
+    def _next_new_intent(self, intent: str | None, ran: list[str]) -> str | None:
+        seen = set()
+        while intent and intent not in seen:
+            seen.add(intent)
+            rules = [r for r in self.registry.rules if r["intent"] == intent]
+            if not rules or any(r["tool_id"] not in ran for r in rules):
+                return intent
+            intent = min(rules, key=lambda r: r["priority"]).get("next_intent_on_fail")
+        return intent
 
     def _reject(self, n: int, decision: dict, reason: str):
         log.warning("Step %d rejected: %s", n, reason)

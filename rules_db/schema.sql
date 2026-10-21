@@ -129,6 +129,8 @@ INSERT INTO tools (tool_id, display_name, description, endpoint, base_command, k
 --                     -> tcp_port_check -> config_check
 --   bgp_state_established -> route_received_not_selected -> route_map_check
 --                     -> prefix_list_check -> config_check
+-- v3.1 (testbed run, 21/10/26): route_leading_case continues to route_map_check instead of
+-- ending the chain, so a route question that lands there still reaches the policy checks.
 -- The analyzer jumps from bgp_state to the rule for the state it observed
 -- (bgp_state_idle, bgp_state_active, ...); bgp_state_check is the entry point
 -- when the state is not known yet.
@@ -197,7 +199,7 @@ INSERT INTO rules (rule_id, intent, tool_id, priority, condition, next_intent_on
      'Prefix absent from RIB but this matches a deliberate deny policy (e.g. default-route filtering, RFC1918 filtering)',
      'Expected filtering by design (distribute-list, prefix-list deny, route-map deny) -- not a bug',
      'Confirm the filtering policy is the one on record as intended (it is in the baseline config); no further action needed'),
-    (16, 'route_leading_case', 'route_table', 1, 'Identify which path is currently the winning/best path for a prefix and why', NULL,
+    (16, 'route_leading_case', 'route_table', 1, 'Identify which path is currently the winning/best path for a prefix and why', 'route_map_check',
      'Multiple valid paths exist; user wants to know which one is active and the deciding attribute',
      'N/A -- diagnostic/informational rule, not a fault',
      'The ">" marked entry in show ip bgp matches the path with the best value at the first differing best-path step'),
@@ -224,4 +226,4 @@ INSERT INTO rules (rule_id, intent, tool_id, priority, condition, next_intent_on
      'Unstable link (link_downs on the peer-facing interface keeps growing); hold timer expiries from packet loss; maximum-prefix teardowns; peer restarts',
      'Up/Down grows past 5 min without resets and link_downs stops increasing');
 
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;

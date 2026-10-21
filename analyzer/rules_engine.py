@@ -27,6 +27,7 @@ from analyzer.verdict import Verdict
 
 ML_CONFIDENCE_THRESHOLD = 0.7   # below this, the ML guess goes to the LLM as a hint
 FLAP_LINK_DOWNS = 3             # link_downs on the peer-facing interface that count as flapping
+RECENT_RESET_SECONDS = 300      # an Established session younger than this was reset recently
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,8 @@ STATE_HINTS = {
              "The session keeps failing and restarting, usually because the OPEN exchange is rejected "
              "(remote-as mismatch, router-id conflict) or the peer doesn't have this router configured. "
              "Call bgp_neighbor next: it shows the NOTIFICATION behind it."),
-    "OpenSent": "OpenSent: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities).",
+    "OpenSent": ("OpenSent: TCP is up but the OPEN negotiation fails (remote-as, router-id, capabilities). "
+                 "Call bgp_neighbor next: it shows the NOTIFICATION behind it."),
     "OpenConfirm": ("OpenConfirm: the OPENs were exchanged but no KEEPALIVE arrived (hold timer, latency, "
                     "or the peer resets after the OPEN). Call bgp_neighbor next."),
     "unknown": ("The peer is not listed in `show bgp summary`, so it is most likely not configured on this router. "
@@ -123,6 +125,9 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
                 return {"decision": "root_cause", "fault_class": "no_route_to_peer",
                         "cause": f"This router has no route to {peer}, so TCP/179 can't be opened",
                         "fix": "Fix the peer-facing interface address or add a route to the peer."}
+            if ctx.get("_flapping"):   # a flapping link explains a dead TCP/179 better than an ACL
+                return {"decision": "continue", "hint": f"TCP/179 to {peer} gets no answer while "
+                                                        f"{ctx['_flapping']} is flapping."}
             return {"decision": "continue",
                     "hint": f"TCP/179 to {peer} gets no answer ({reason or 'unreachable'}). With the interface and "
                             f"route fine, packets are being dropped: a firewall/ACL on either router, or link loss.",
@@ -133,6 +138,18 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
                                  f"losing packets",
                         "fix": f"Check `iptables -L -n` on both routers for rules covering port 179, and the link "
                                f"for loss (`ping -c 20 {peer}`)."}}
+        if parsed.get("reachable") and ctx.get("_state") not in (None, "Established") and not ctx.get("_flapping"):
+            # TCP/179 is open, yet the session doesn't come up: the peer takes the connection and drops it
+            return {"decision": "continue",
+                    "hint": f"TCP/179 to {peer} is reachable but the session is {ctx['_state']}: the peer accepts "
+                            f"TCP and then closes it. Check this router's config, then the peer's.",
+                    "tentative": {
+                        "fault_class": "neighbor_missing",
+                        "cause": f"TCP/179 to {peer} is reachable but the session stays {ctx['_state']}: the peer "
+                                 f"accepts the TCP connection and then closes it. Most likely the peer has no "
+                                 f"`neighbor` statement for this router (or one with the wrong address/remote-as)",
+                        "fix": f"On {peer}: `show running-config` and check for `neighbor <this router's address> "
+                               f"remote-as <this router's AS>`; add it if missing."}}
         return {"decision": "continue"}
 
     if tool_id == "config":
@@ -156,6 +173,8 @@ def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
     peer = ctx.get("peer") or "<peer>"
     state = parsed.get("queried_peer_state")
     reason = parsed.get("queried_peer_state_reason")
+    ctx["_state"] = state
+    ctx["_router_id"] = parsed.get("router_id")
 
     if state == "Established":
         if reason in ("Policy", "NoNeg") and not ctx.get("route_question"):
@@ -182,8 +201,17 @@ def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
             target = ctx.get("route_intent") or "route_received_not_selected"
             return {"decision": "continue", "suggested_next_intent": target,
                     "hint": f"The session with {peer} is up; the question is about routes, so continue with {target}."}
+        uptime = (parsed.get("uptimes") or {}).get(peer)
+        seconds = _seconds(uptime)
+        if seconds is not None and seconds < RECENT_RESET_SECONDS:
+            return {"decision": "healthy", "fault_class": "healthy",
+                    "cause": f"BGP peer {peer} is Established, but it has only been up for {uptime}: the session "
+                             f"was reset moments ago (a manual clear, a peer restart, or a flap) and has recovered",
+                    "fix": f"No action needed if the reset was intended. If not, check `show bgp neighbors {peer}` "
+                           f"(Last reset) and run bgp_state again in a few minutes: an Up/Down that keeps "
+                           f"resetting means the session is flapping."}
         return {"decision": "healthy", "fault_class": "healthy",
-                "cause": f"BGP peer {peer} is Established",
+                "cause": f"BGP peer {peer} is Established" + (f" (up {uptime})" if uptime else ""),
                 "fix": "No action needed — the session is up."}
 
     if reason == "Admin":
@@ -202,6 +230,12 @@ def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
     if hint:
         out["hint"] = hint
     return out
+
+
+def _seconds(uptime: str | None) -> int | None:
+    """Seconds in an Up/Down value like 00:01:23; None for longer forms (1d02h03m, 02w3d) or none."""
+    m = re.fullmatch(r"(\d+):(\d{2}):(\d{2})", uptime or "")
+    return int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3]) if m else None
 
 
 # --- interface / route to peer ---------------------------------------------------
@@ -236,6 +270,7 @@ def _interface_finding(parsed: dict, ctx: dict) -> dict:
     down = [n for n, i in interfaces.items()
             if i.get("link_state") == "down" or i.get("admin_state") == "down"]
     ctx["_down_ifaces"] = down
+    ctx["_interfaces"] = interfaces
 
     if not peer:
         # no peer to relate interfaces to: any down interface is the best lead
@@ -267,6 +302,14 @@ def _interface_finding(parsed: dict, ctx: dict) -> dict:
     downs = info.get("link_downs")
     if downs is not None and downs >= FLAP_LINK_DOWNS:
         hint += f" It has gone down {downs} times: the link may be flapping (see bgp_session_flapping)."
+        ctx["_flapping"] = facing
+        return {"decision": "continue", "hint": hint,
+                "tentative": {
+                    "fault_class": "interface_down",
+                    "cause": f"Interface {facing}, the one towards {peer}, is up right now but its link has gone "
+                             f"down {downs} times: the link is flapping and the BGP session drops with it",
+                    "fix": f"Check the cabling / far end of {facing} and the peer's interface; run `show interface "
+                           f"{facing}` again and see if the link-down count keeps growing."}}
     return {"decision": "continue", "hint": hint}
 
 
@@ -289,10 +332,25 @@ def _route_to_peer_finding(parsed: dict, ctx: dict) -> dict:
                    if parsed.get("is_default") else "")
     return {"decision": "root_cause", "fault_class": "no_route_to_peer",
             "cause": f"This router has no route to {peer}{via_default}: no interface has an address on the "
-                     f"peer's subnet (the address is missing or wrong) and no static or IGP route covers it",
+                     f"peer's subnet (the address is missing or wrong) and no static or IGP route covers it"
+                     + _address_suspects(ctx.get("_interfaces") or {}, parsed.get("interface") if parsed.get("is_default") else None, peer),
             "fix": f"Put the right address on the peer-facing interface (`ip addr add <addr>/<len> dev <iface>` "
                    f"or `interface <iface> / ip address <addr>/<len>`), or, for loopback peering, add a route "
                    f"(`ip route {peer}/32 <next-hop>`)."}
+
+
+def _address_suspects(interfaces: dict, default_iface: str | None, peer: str | None) -> str:
+    """Name the interfaces that could be the peer-facing one: up, not loopback/management."""
+    candidates = {n: i for n, i in interfaces.items()
+                  if n != default_iface and not n.startswith("lo") and i.get("link_state") != "down"}
+    bare = [n for n, i in candidates.items() if not _addresses(i)]
+    other = [f"{n} has {', '.join(_addresses(i))}" for n, i in candidates.items() if _addresses(i)]
+    parts = []
+    if bare:
+        parts.append(f"{', '.join(bare)} {'is' if len(bare) == 1 else 'are'} up with no IPv4 address")
+    if other:
+        parts.append(f"{'; '.join(other)}, none of which is on {peer}'s subnet")
+    return (". " + ". ".join(parts)) if parts else ""
 
 
 # --- config ---------------------------------------------------------------------------
@@ -311,6 +369,24 @@ def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
                          f"defined: FRR then denies every route in that direction",
                 "fix": f"Define route-map {name}, or point the neighbor at an existing one: router bgp <local-asn> / "
                        f"address-family ipv4 unicast / neighbor {peer} route-map <existing> {direction}"}
+
+    if peer and re.search(rf"^\s*no neighbor {re.escape(peer)} activate\s*$", running, re.MULTILINE):
+        return {"decision": "root_cause", "fault_class": "afi_not_negotiated",
+                "cause": f"IPv4 unicast is not activated for neighbor {peer} (`no neighbor {peer} activate` under "
+                         f"address-family ipv4 unicast): the neighbor drops out of the IPv4 `show bgp summary` and "
+                         f"no IPv4 prefixes are exchanged",
+                "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} activate, then "
+                       f"re-apply the neighbor's route-maps in/out (FRR removes them on deactivate)."}
+
+    misdirected = _misdirected_route_maps(running)
+    if misdirected:
+        neighbor, name, what = misdirected[0]
+        return {"decision": "root_cause", "fault_class": "route_filtered",
+                "cause": f"Route-map {name} sets {what} but is applied outbound to eBGP neighbor {neighbor}: "
+                         f"{what} only takes effect on routes this router receives, so it has no effect here "
+                         f"(applied in the wrong direction)",
+                "fix": f"router bgp <local-asn> / address-family ipv4 unicast / no neighbor {neighbor} route-map "
+                       f"{name} out / neighbor {neighbor} route-map {name} in"}
 
     if parsed.get("has_baseline") and parsed.get("drifted"):
         severity = parsed.get("severity")
@@ -346,6 +422,30 @@ def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
             "cause": f"ttl-security (GTSM) is configured for {peer}. If the peer does not send TTL 255, this "
                      f"router drops its packets and the session never forms",
             "fix": f"Configure `neighbor <addr> ttl-security hops <n>` on both routers, or remove it on both."}
+    return out
+
+
+def _misdirected_route_maps(running: str) -> list[tuple[str, str, str]]:
+    """(neighbor, route-map, attribute) for route-maps that set local-preference/weight outbound to eBGP peers."""
+    local_as = next((l.split()[2] for l in running.splitlines()
+                     if l.startswith("router bgp ") and len(l.split()) > 2), None)
+    sets, current = {}, None
+    for line in running.splitlines():
+        m = ROUTE_MAP_DEF_RE.match(line)
+        if m:
+            current = m["name"]
+        elif current and line.startswith((" ", "\t")):
+            words = line.split()
+            if words[:2] in (["set", "local-preference"], ["set", "weight"]):
+                sets.setdefault(current, words[1])
+        else:
+            current = None
+    remote = dict(re.findall(r"^\s*neighbor (\S+) remote-as (\S+)", running, re.MULTILINE))
+    out = []
+    for neighbor, name in re.findall(r"^\s*neighbor (\S+) route-map (\S+) out\s*$", running, re.MULTILINE):
+        ebgp = remote.get(neighbor) not in (local_as, "internal")
+        if name in sets and (ebgp or sets[name] == "weight"):
+            out.append((neighbor, name, sets[name]))
     return out
 
 
@@ -405,14 +505,34 @@ def _route_table_finding(p: dict, ctx: dict) -> dict:
                            f"and outbound policy."}}
     best = p.get("best_path")
     paths = p.get("paths") or []
-    if prefix and paths and not best:
+    unusable = _unusable_networks(paths)
+    if (prefix and paths and not best) or (not prefix and unusable):
         bad = [x for x in paths if x.get("valid") is False or x.get("next_hop_reachable") is False]
         hops = ", ".join(sorted({x["next_hop"] for x in bad})) or "?"
+        what = f"{prefix} is" if prefix else f"{', '.join(unusable)} {'is' if len(unusable) == 1 else 'are'}"
         return {"decision": "root_cause", "fault_class": "route_not_selected",
-                "cause": f"{prefix} is received but no path is valid: next hop {hops} is not reachable from this "
+                "cause": f"{what} received but no path is valid: next hop {hops} is not reachable from this "
                          f"router (typical for iBGP without next-hop-self)",
                 "fix": "On the router that passes the route over iBGP: router bgp <asn> / address-family ipv4 "
                        "unicast / neighbor <ibgp-peer> next-hop-self; or make the next hop reachable (IGP/static)."}
+    peer = ctx.get("peer")
+    if prefix and best and peer and any("from_peer" in x for x in paths) \
+            and not any(peer in (x.get("from_peer"), x.get("next_hop")) for x in paths):
+        # the question names a peer, and no path comes from it: that path is what's missing
+        ctx["_route_missing"] = f"{prefix} from {peer}"
+        text, _ = _best_path_cause(p)
+        return {"decision": "continue",
+                "hint": f"{text}. No path comes from {peer}: it doesn't advertise {prefix} to this router, or an "
+                        f"inbound filter drops it. Check route_map, prefix_list and the config.",
+                "tentative": {
+                    "fault_class": "route_not_received",
+                    "cause": f"This router has no path for {prefix} from {peer} ({text}) and no filter on this "
+                             f"router explains it: {peer} does not send it (its outbound route-map/prefix-list "
+                             f"drops it, or it does not have it), or the AS-path contains this router's own AS "
+                             f"and loop prevention drops it",
+                    "fix": f"On {peer}: `show ip bgp {prefix}`, `show ip bgp neighbors <this router> "
+                           f"advertised-routes` and its outbound route-map/prefix-list; check the AS-path it sends "
+                           f"for this router's AS."}}
     if prefix and best:
         text, attr = _best_path_cause(p)
         finding = {"fault_class": "route_not_selected" if p.get("paths_not_selected") else "route_as_intended",
@@ -424,8 +544,22 @@ def _route_table_finding(p: dict, ctx: dict) -> dict:
             ctx["_route_finding"] = {**finding, "attr": attr}
             return {"decision": "continue", "hint": text + ". Check route_map for a set clause on it.",
                     "tentative": finding}
+        if p.get("paths_not_selected"):
+            # decided on a tie-break: a policy that should have decided it may be missing or misapplied
+            return {"decision": "continue", "hint": text + ". Check the route-maps and config for a policy "
+                                                           "that was meant to decide this.",
+                    "tentative": finding}
         return {"decision": "root_cause", **finding}
     return {"decision": "continue", "hint": _route_table_hint(p)}
+
+
+def _unusable_networks(paths: list[dict]) -> list[str]:
+    """Networks in a whole-table listing with paths but no usable (best) one."""
+    nets = {}
+    for x in paths:
+        nets.setdefault(x.get("network"), []).append(x)
+    return sorted(n for n, xs in nets.items() if n and not any(x["is_best"] for x in xs)
+                  and any(x.get("valid") is False for x in xs))
 
 
 def _route_map_finding(p: dict, ctx: dict) -> dict:
@@ -441,6 +575,13 @@ def _route_map_finding(p: dict, ctx: dict) -> dict:
                 "fix": "If these routes should be accepted, narrow the deny entry's match clause, move it after "
                        "the permit, or remove it; if the filtering is intended this is route_as_intended."}
 
+    no_catch_all = sorted({m["name"] for m in maps if m.get("match_clauses")}
+                          - {m["name"] for m in maps if m["action"] == "permit" and not m.get("match_clauses")})
+    implicit = (f"route-map(s) {', '.join(no_catch_all)} have no catch-all permit entry: routes that match none of "
+                f"the entries are dropped by the implicit deny at the end")
+    implicit_fix = ("Add a final `route-map <name> permit <seq>` with no match clause if other routes should pass, "
+                    "or widen the match clause.")
+
     found = ctx.get("_route_finding")
     if found:
         words = ROUTE_MAP_SETS.get(found["attr"], ())
@@ -454,22 +595,19 @@ def _route_map_finding(p: dict, ctx: dict) -> dict:
         else:
             finding["cause"] += (". No route-map on this router sets it: look at neighbor weight here, "
                                  "or the peer's outbound policy (e.g. AS-path prepend, MED)")
+        if no_catch_all:
+            finding["cause"] += f". Note: {implicit}"
         return {"decision": "root_cause", **finding}
 
-    if ctx.get("_route_missing"):
-        catch_all = any(m["action"] == "permit" and not m.get("match_clauses") for m in maps)
-        if maps and not catch_all:
-            names = sorted({m["name"] for m in maps})
-            return {"decision": "continue",
-                    "hint": f"Route-map(s) {', '.join(names)} have no catch-all permit: a route matching none of "
-                            f"their entries hits the implicit deny.",
-                    "tentative": {
-                        "fault_class": "route_filtered",
-                        "cause": f"{ctx['_route_missing']} is missing and route-map(s) {', '.join(names)} have no "
-                                 f"catch-all permit entry: routes that match none of the entries are dropped by the "
-                                 f"implicit deny at the end",
-                        "fix": "Add a final `route-map <name> permit <seq>` with no match clause if other routes "
-                               "should pass, or widen the match clause."}}
+    if no_catch_all:
+        missing = ctx.get("_route_missing")
+        return {"decision": "continue",
+                "hint": f"Route-map(s) {', '.join(no_catch_all)} have no catch-all permit: a route matching none of "
+                        f"their entries hits the implicit deny.",
+                "tentative": {
+                    "fault_class": "route_filtered",
+                    "cause": (f"{missing} is missing and " if missing else "") + implicit,
+                    "fix": implicit_fix}}
     return {"decision": "continue", "hint": _route_map_hint(p)}
 
 
@@ -532,6 +670,11 @@ def _neighbor_finding(p: dict, ctx: dict) -> dict:
         return {"decision": "root_cause", "fault_class": "neighbor_missing",
                 "cause": f"Neighbor {peer} is not configured on this router",
                 "fix": f"router bgp <local-asn> / neighbor {peer} remote-as <peer-asn>"}
+    if p.get("state") == "Established" and ctx.get("_state") == "unknown":
+        return {"decision": "root_cause", "fault_class": "afi_not_negotiated",
+                "cause": f"Neighbor {peer} is Established but missing from the IPv4 `show bgp summary`: IPv4 "
+                         f"unicast is not activated for it, so no IPv4 prefixes are exchanged",
+                "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} activate"}
     if p.get("state") == "Established":
         return {"decision": "healthy", "fault_class": "healthy",
                 "cause": f"BGP peer {peer} is Established",
@@ -567,6 +710,8 @@ def _neighbor_finding(p: dict, ctx: dict) -> dict:
                 "fix": f"{on_peer}: router bgp {remote_as} / no neighbor {me} shutdown"}
     if "Bad BGP Identifier" in error:
         rid = p.get("remote_router_id")
+        if rid in (None, "0.0.0.0"):   # not learned while the session is down; ours is the duplicate
+            rid = ctx.get("_router_id")
         return {"decision": "root_cause", "fault_class": "router_id_conflict",
                 "cause": f"The OPEN from {peer} was rejected with Bad BGP Identifier: the two routers use the same "
                          f"BGP router-id" + (f" ({rid})" if rid else ""),
@@ -627,10 +772,8 @@ def _neighbor_facts(running: str, peer: str | None) -> str:
         hint += (f" FRR fix on this router: `router bgp {local_as or '<local-asn>'}` then "
                  f"`no neighbor {peer} shutdown`.")
     elif remote_as:
-        hint += (f" If the session still fails, compare remote-as {remote_as} with the AS the peer "
-                 f"actually runs (`show running-config` on {peer}, line `router bgp <asn>`): a difference "
-                 f"is a remote-as mismatch. FRR fix on THIS router: `router bgp {local_as or '<local-asn>'}` "
-                 f"then `neighbor {peer} remote-as <the peer's real AS>`.")
+        hint += (f" A remote-as mismatch shows up as a Bad Peer AS NOTIFICATION in bgp_neighbor; without one, "
+                 f"remote-as {remote_as} is not the cause.")
     return hint
 
 
@@ -718,6 +861,9 @@ def diagnose(client, question: str, host: str, peer: str,
     ml = ml_engine.predict(evidence, peer) if use_ml else None
     if not ml:
         log.info("ML engine skipped (--no-ml)")
+    elif _ml_contradicts(ml.label, ctx):
+        log.info("ML engine said %s (%.2f), but the chain saw the session %s%s; not using it",
+                 ml.label, ml.confidence, ctx.get("_state"), " on a route question" if route_question else "")
     elif ml.label != "unknown" and ml.confidence >= ML_CONFIDENCE_THRESHOLD:
         log.info("ML engine decided: %s (%.2f >= threshold %.2f)",
                  ml.label, ml.confidence, ML_CONFIDENCE_THRESHOLD)
@@ -749,6 +895,13 @@ def diagnose(client, question: str, host: str, peer: str,
                    source="llm", confidence=llm["confidence"],
                    ml_prediction=verdict.ml_prediction, next_checks=llm["next_checks"],
                    notes=[f"Diagnosed by {llm['model']}"])
+
+
+def _ml_contradicts(label: str, ctx: dict) -> bool:
+    """A "healthy" guess can't stand once the chain saw a session that is not up, or a route problem."""
+    if label != "healthy":
+        return False
+    return ctx.get("_state") not in (None, "Established") or bool(ctx.get("route_question"))
 
 
 def _rules_verdict(outcome: dict, checked: list, evidence: list, peer: str, use_ml: bool) -> Verdict:

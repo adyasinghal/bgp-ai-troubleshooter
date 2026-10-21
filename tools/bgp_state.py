@@ -5,8 +5,11 @@ and parses out each peer's state (Established, Active, Connect, Idle...).
 """
 
 import ipaddress
+import re
 
 from tools.base_tool import BaseTool, ToolResult
+
+ROUTER_ID_RE = re.compile(r"BGP router identifier (?P<id>[\d.]+)")
 
 
 class BGPStateTool(BaseTool):
@@ -28,7 +31,8 @@ class BGPStateTool(BaseTool):
         # (e.g. `no neighbor X activate`), so no prefixes are exchanged.
         # A long IPv6 neighbor address is printed alone and the row continues on
         # the next line; join the two before reading columns.
-        peers, reasons = {}, {}
+        # Column 8 (Up/Down) is kept per peer: a young Established session was just reset.
+        peers, reasons, uptimes = {}, {}, {}
         pending = None
 
         for line in output.splitlines():
@@ -65,8 +69,11 @@ class BGPStateTool(BaseTool):
                 state = state_field           # unknown -> pass through as-is
 
             peers[neighbor] = state
+            uptimes[neighbor] = fields[8]
 
-        parsed = {"peers": peers, "state_reasons": {n: r for n, r in reasons.items() if r}}
+        router_id = ROUTER_ID_RE.search(output)
+        parsed = {"peers": peers, "state_reasons": {n: r for n, r in reasons.items() if r},
+                  "uptimes": uptimes, "router_id": router_id["id"] if router_id else None}
         if peer:
             parsed["queried_peer_state"] = peers.get(peer, "unknown")
             parsed["queried_peer_state_reason"] = parsed["state_reasons"].get(peer)

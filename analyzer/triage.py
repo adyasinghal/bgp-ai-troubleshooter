@@ -41,7 +41,9 @@ def route_intent(question: str) -> str | None:
         return "route_best_path_selection"
     if about_routes and re.search(r"not (?:being )?(?:selected|chosen|preferred|used|best|installed|received|"
                                   r"learn(?:ed|t)?|showing|there|in the table)|isn'?t (?:selected|chosen|there)"
-                                  r"|missing|disappear|gone|lost|filtered|dropped|withdrawn", q):
+                                  r"|(?:not|n't) (?:receiving|learning|getting|seeing|accepting)"
+                                  r"|\bno (?:routes?|prefix(?:es)?|paths?)\b|\bzero (?:routes|prefixes)\b"
+                                  r"|missing|disappear|gone|lost|filtered|dropped|withdrawn|denied|rejected", q):
         return "route_received_not_selected"
     if re.search(r"route-?map|route map|prefix-?list|prefix list|filter-?list", q):
         return "route_map_check"
