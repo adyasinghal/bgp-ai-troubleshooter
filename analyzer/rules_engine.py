@@ -125,9 +125,6 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
                 return {"decision": "root_cause", "fault_class": "no_route_to_peer",
                         "cause": f"This router has no route to {peer}, so TCP/179 can't be opened",
                         "fix": "Fix the peer-facing interface address or add a route to the peer."}
-            if ctx.get("_flapping"):   # a flapping link explains a dead TCP/179 better than an ACL
-                return {"decision": "continue", "hint": f"TCP/179 to {peer} gets no answer while "
-                                                        f"{ctx['_flapping']} is flapping."}
             return {"decision": "continue",
                     "hint": f"TCP/179 to {peer} gets no answer ({reason or 'unreachable'}). With the interface and "
                             f"route fine, packets are being dropped: a firewall/ACL on either router, or link loss.",
@@ -138,7 +135,7 @@ def evaluate(tool_id: str, result: dict, ctx: dict) -> dict:
                                  f"losing packets",
                         "fix": f"Check `iptables -L -n` on both routers for rules covering port 179, and the link "
                                f"for loss (`ping -c 20 {peer}`)."}}
-        if parsed.get("reachable") and ctx.get("_state") not in (None, "Established") and not ctx.get("_flapping"):
+        if parsed.get("reachable") and ctx.get("_state") not in (None, "Established"):
             # TCP/179 is open, yet the session doesn't come up: the peer takes the connection and drops it
             return {"decision": "continue",
                     "hint": f"TCP/179 to {peer} is reachable but the session is {ctx['_state']}: the peer accepts "
@@ -174,18 +171,17 @@ def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
     state = parsed.get("queried_peer_state")
     reason = parsed.get("queried_peer_state_reason")
     ctx["_state"] = state
+    ctx["_state_reason"] = reason
     ctx["_router_id"] = parsed.get("router_id")
 
     if state == "Established":
-        if reason in ("Policy", "NoNeg") and not ctx.get("route_question"):
+        if reason == "Policy" and not ctx.get("route_question"):
             # the session itself is up; for a session question that is the answer
-            why = ("no route policy for this eBGP peer ((Policy): bgp ebgp-requires-policy)" if reason == "Policy"
-                   else "no address family negotiated (NoNeg: neighbor not activated)")
             return {"decision": "healthy", "fault_class": "healthy",
-                    "cause": f"BGP peer {peer} is Established, but it exchanges no routes: {why}",
+                    "cause": f"BGP peer {peer} is Established, but it exchanges no routes: no route policy for this "
+                             f"eBGP peer ((Policy): bgp ebgp-requires-policy)",
                     "fix": "No action needed for the session. If routes from this peer are expected, "
-                           + ("add a route-map in/out for the neighbor." if reason == "Policy"
-                              else f"`neighbor {peer} activate` under address-family ipv4 unicast.")}
+                           "add a route-map in/out for the neighbor."}
         if reason == "Policy":
             return {"decision": "root_cause", "fault_class": "route_filtered",
                     "cause": f"The session with {peer} is up but FRR exchanges no routes with it: it is an eBGP "
@@ -193,10 +189,17 @@ def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
                     "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} route-map <MAP> in "
                            f"(and out), or `no bgp ebgp-requires-policy` if no policy is wanted."}
         if reason == "NoNeg":
-            return {"decision": "root_cause", "fault_class": "afi_not_negotiated",
-                    "cause": f"The session with {peer} is up but no address family was negotiated (NoNeg): "
-                             f"IPv4 unicast is not activated for the neighbor, so no prefixes are exchanged",
-                    "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} activate"}
+            # never intended: the config says whether it is capabilities or activation
+            return {"decision": "continue", "suggested_next_intent": "config_check",
+                    "hint": f"{peer} is Established but no address family was negotiated (NoNeg). Check the config "
+                            f"for `no neighbor ... activate`, strict-capability-match or dont-capability-negotiate.",
+                    "tentative": {
+                        "fault_class": "afi_not_negotiated",
+                        "cause": f"The session with {peer} is up but no address family was negotiated (NoNeg), so no "
+                                 f"prefixes are exchanged: IPv4 unicast is not activated for the neighbor on one side, "
+                                 f"or the peer does not negotiate capabilities (dont-capability-negotiate)",
+                        "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} activate on "
+                               f"both routers, and remove dont-capability-negotiate on the peer if it is set."}}
         if ctx.get("route_question"):
             target = ctx.get("route_intent") or "route_received_not_selected"
             return {"decision": "continue", "suggested_next_intent": target,
@@ -204,12 +207,15 @@ def _bgp_state_finding(parsed: dict, ctx: dict) -> dict:
         uptime = (parsed.get("uptimes") or {}).get(peer)
         seconds = _seconds(uptime)
         if seconds is not None and seconds < RECENT_RESET_SECONDS:
-            return {"decision": "healthy", "fault_class": "healthy",
+            ctx["_recent"] = uptime
+            return {"decision": "continue", "suggested_next_intent": "bgp_neighbor_detail",
+                    "hint": f"{peer} is Established but only up {uptime}: read the last reset reason.",
+                    "tentative": {"fault_class": "healthy",
                     "cause": f"BGP peer {peer} is Established, but it has only been up for {uptime}: the session "
                              f"was reset moments ago (a manual clear, a peer restart, or a flap) and has recovered",
                     "fix": f"No action needed if the reset was intended. If not, check `show bgp neighbors {peer}` "
                            f"(Last reset) and run bgp_state again in a few minutes: an Up/Down that keeps "
-                           f"resetting means the session is flapping."}
+                           f"resetting means the session is flapping."}}
         return {"decision": "healthy", "fault_class": "healthy",
                 "cause": f"BGP peer {peer} is Established" + (f" (up {uptime})" if uptime else ""),
                 "fix": "No action needed — the session is up."}
@@ -301,15 +307,9 @@ def _interface_finding(parsed: dict, ctx: dict) -> dict:
     hint = f"Interface {facing} towards {peer} is up/up ({', '.join(_addresses(info))})."
     downs = info.get("link_downs")
     if downs is not None and downs >= FLAP_LINK_DOWNS:
-        hint += f" It has gone down {downs} times: the link may be flapping (see bgp_session_flapping)."
-        ctx["_flapping"] = facing
-        return {"decision": "continue", "hint": hint,
-                "tentative": {
-                    "fault_class": "interface_down",
-                    "cause": f"Interface {facing}, the one towards {peer}, is up right now but its link has gone "
-                             f"down {downs} times: the link is flapping and the BGP session drops with it",
-                    "fix": f"Check the cabling / far end of {facing} and the peer's interface; run `show interface "
-                           f"{facing}` again and see if the link-down count keeps growing."}}
+        # a counter since boot, so old outages count too: a hint, not a finding
+        hint += (f" It has gone down {downs} times since boot: if that count keeps growing between checks, "
+                 f"the link is flapping (see bgp_session_flapping).")
     return {"decision": "continue", "hint": hint}
 
 
@@ -388,6 +388,42 @@ def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
                 "fix": f"router bgp <local-asn> / address-family ipv4 unicast / no neighbor {neighbor} route-map "
                        f"{name} out / neighbor {neighbor} route-map {name} in"}
 
+    lines = [l.strip() for l in running.splitlines() if peer and l.strip().startswith(f"neighbor {peer} ")]
+    caps = [l for l in lines if l.endswith((" strict-capability-match", " dont-capability-negotiate"))]
+    if caps and (ctx.get("_state") != "Established" or ctx.get("_state_reason") == "NoNeg"):
+        return {"decision": "root_cause", "fault_class": "capability_mismatch",
+                "cause": f"This router has `{caps[0]}` for {peer}: with a peer that doesn't offer the same "
+                         f"capabilities (e.g. it has dont-capability-negotiate), the OPEN fails with Unsupported "
+                         f"Capability or the session comes up with no address family negotiated",
+                "fix": f"Remove `{caps[0]}` here (and `dont-capability-negotiate` on the peer, if set) so both sides "
+                       f"negotiate the same capabilities."}
+
+    filters = re.findall(rf"^\s*neighbor {re.escape(peer or '')} filter-list (\S+) (in|out)\s*$", running, re.MULTILINE)
+    if filters and ctx.get("_route_missing"):
+        name, direction = filters[0]
+        return {"decision": "root_cause", "fault_class": "route_filtered",
+                "cause": f"{ctx['_route_missing']} is missing and neighbor {peer} has AS-path filter-list {name} "
+                         f"({direction}): routes whose AS-path matches a deny entry of `bgp as-path access-list {name}` "
+                         f"are dropped",
+                "fix": f"Check `show bgp as-path-access-list {name}`; narrow the deny entry or remove "
+                       f"`neighbor {peer} filter-list {name} {direction}`."}
+
+    session_tentative = None
+    if any(" password " in f" {l} " for l in lines):
+        session_tentative = {
+            "fault_class": "auth_mismatch",
+            "cause": f"A TCP-MD5 password is configured for {peer}. If the peer has no password or a different "
+                     f"one, the kernel silently drops the TCP segments and the session stays Active/Connect",
+            "fix": f"Configure the same `neighbor <addr> password <secret>` on both routers (or remove it on both)."}
+    elif any(" ttl-security " in f" {l} " for l in lines):
+        session_tentative = {
+            "fault_class": "config_drift",
+            "cause": f"ttl-security (GTSM) is configured for {peer}. If the peer does not send TTL 255, this "
+                     f"router drops its packets and the session never forms",
+            "fix": f"Configure `neighbor <addr> ttl-security hops <n>` on both routers, or remove it on both."}
+    if ctx.get("_state") == "Established":
+        session_tentative = None   # these only matter for a session that is down
+
     if parsed.get("has_baseline") and parsed.get("drifted"):
         severity = parsed.get("severity")
         if severity == "cosmetic":
@@ -397,6 +433,11 @@ def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
             changes = parsed.get("relevant_changes") or [
                 l for l in parsed.get("diff", []) if l[:1] in "+-" and not l.startswith(("+++", "---"))]
             shown = "; ".join(l.strip() for l in changes[:5]) + (" ..." if len(changes) > 5 else "")
+            # the drift confirms a more specific finding rather than replacing it
+            specific = session_tentative or ctx.get("_tentative")
+            if specific and specific["fault_class"] not in ("healthy", "tcp_unreachable", "neighbor_missing"):
+                return {"decision": "root_cause", **specific,
+                        "cause": specific["cause"] + f". Changed since the baseline: {shown}"}
             return {"decision": "root_cause", "fault_class": "config_drift",
                     "cause": f"Running config has drifted from the baseline: {shown}",
                     "fix": "Review the diff and restore the correct BGP settings (lines starting '-' are the "
@@ -409,19 +450,8 @@ def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
                 "fix": f"router bgp <local-asn> / neighbor {peer} remote-as <peer-asn>"}
 
     out = {"decision": "continue", "hint": _neighbor_facts(running, peer)}
-    lines = [l.strip() for l in running.splitlines() if peer and l.strip().startswith(f"neighbor {peer} ")]
-    if any(" password " in f" {l} " for l in lines):
-        out["tentative"] = {
-            "fault_class": "auth_mismatch",
-            "cause": f"A TCP-MD5 password is configured for {peer}. If the peer has no password or a different "
-                     f"one, the kernel silently drops the TCP segments and the session stays Active/Connect",
-            "fix": f"Configure the same `neighbor <addr> password <secret>` on both routers (or remove it on both)."}
-    elif any(" ttl-security " in f" {l} " for l in lines):
-        out["tentative"] = {
-            "fault_class": "config_drift",
-            "cause": f"ttl-security (GTSM) is configured for {peer}. If the peer does not send TTL 255, this "
-                     f"router drops its packets and the session never forms",
-            "fix": f"Configure `neighbor <addr> ttl-security hops <n>` on both routers, or remove it on both."}
+    if session_tentative:
+        out["tentative"] = session_tentative
     return out
 
 
@@ -675,6 +705,26 @@ def _neighbor_finding(p: dict, ctx: dict) -> dict:
                 "cause": f"Neighbor {peer} is Established but missing from the IPv4 `show bgp summary`: IPv4 "
                          f"unicast is not activated for it, so no IPv4 prefixes are exchanged",
                 "fix": f"router bgp <local-asn> / address-family ipv4 unicast / neighbor {peer} activate"}
+    if p.get("state") == "Established" and ctx.get("_recent"):
+        last = p.get("last_reset") or ""
+        if "Hold Timer Expired" in last:
+            return {"decision": "root_cause", "fault_class": "hold_timer_expired",
+                    "cause": f"The session with {peer} is up again (for {ctx['_recent']}), but it was just torn down by "
+                             f"Hold Timer Expired: keepalives are being lost (packet loss or latency on the link, or "
+                             f"timers too short for it), so it keeps flapping",
+                    "fix": f"Check the link for loss/latency (`ping -c 50 {peer}`); restore default timers "
+                           f"(`no neighbor {peer} timers`) or raise them."}
+        if "interface down" in last.lower() or "link down" in last.lower():
+            return {"decision": "root_cause", "fault_class": "interface_down",
+                    "cause": f"The session with {peer} is up again (for {ctx['_recent']}), but it was just reset because "
+                             f"the interface towards it went down (Last reset: {last}): the link is unstable/flapping",
+                    "fix": "Check the cabling and the far end of the peer-facing link, and whether its link-down "
+                           "count (`show interface`) keeps growing."}
+        return {"decision": "healthy", "fault_class": "healthy",
+                "cause": f"BGP peer {peer} is Established, but it has only been up for {ctx['_recent']}: the session "
+                         f"was reset moments ago and has recovered (Last reset: {last or 'unknown'})",
+                "fix": "No action needed if the reset was intended (a manual clear or a peer restart). If not, run "
+                       "bgp_state again in a few minutes: an Up/Down that keeps resetting means it is flapping."}
     if p.get("state") == "Established":
         return {"decision": "healthy", "fault_class": "healthy",
                 "cause": f"BGP peer {peer} is Established",
@@ -842,6 +892,7 @@ def diagnose(client, question: str, host: str, peer: str,
                 return _rules_verdict(outcome, checked, evidence, peer, use_ml)
             if outcome.get("tentative"):
                 tentative = outcome["tentative"]
+                ctx["_tentative"] = tentative
                 log.info("Tentative finding after %s: %s", tool_id, tentative["fault_class"])
             if outcome.get("suggested_next_intent"):
                 next_intent = outcome["suggested_next_intent"]
