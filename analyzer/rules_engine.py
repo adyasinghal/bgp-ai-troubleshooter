@@ -427,6 +427,14 @@ def _config_finding(parsed: dict, running: str, ctx: dict) -> dict:
     if parsed.get("has_baseline") and parsed.get("drifted"):
         severity = parsed.get("severity")
         if severity == "cosmetic":
+            if ctx.get("_state") in (None, "Established") and not ctx.get("_tentative"):
+                # nothing else is wrong: the drift itself is the answer, and it is harmless
+                changes = [l.strip() for l in parsed.get("diff", [])
+                           if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+                return {"decision": "healthy", "fault_class": "healthy",
+                        "cause": "The config differs from the baseline only in descriptions/comments, which can't "
+                                 "change BGP behaviour: not a fault" + (f" ({'; '.join(changes[:4])})" if changes else ""),
+                        "fix": "No action needed. Save a new baseline if the change is intended."}
             return {"decision": "continue",
                     "hint": "The config differs from the baseline only in descriptions/comments: not a fault."}
         if severity != "none":   # "bgp", or None from an older config tool
