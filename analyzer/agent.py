@@ -152,10 +152,10 @@ class Investigation:
             # intent with a tool that hasn't run yet.
             finding["suggested_next_intent"] = self._next_new_intent(finding["suggested_next_intent"],
                                                                      self.checked + [tool_id])
-        elif finding["decision"] == "healthy":
+        if finding["decision"] == "healthy":
             finding["note"] = ("The session is up. If the question is about the session, conclude; "
                                "if it is about routes or prefixes, continue with route_table.")
-        else:
+        elif finding["decision"] == "root_cause":
             finding["note"] = "The rule book considers this decided. Conclude unless other evidence contradicts it."
         summary = summarize(tool_id, result)
         if finding["decision"] != "continue":
