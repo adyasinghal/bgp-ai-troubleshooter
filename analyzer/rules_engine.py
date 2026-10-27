@@ -22,7 +22,7 @@ import re
 
 from analyzer import llm_escalation, ml_engine
 from analyzer.tool_registry import ToolRegistry
-from analyzer.triage import extract_prefix, route_intent, triage
+from analyzer.triage import route_context, triage
 from analyzer.verdict import Verdict
 
 ML_CONFIDENCE_THRESHOLD = 0.7   # below this, the ML guess goes to the LLM as a hint
@@ -848,15 +848,13 @@ def _args_for(registry: ToolRegistry, tool_id: str, ctx: dict) -> dict:
 
 def diagnose(client, question: str, host: str, peer: str,
              use_ml: bool = True, use_llm: bool = True) -> Verdict:
-    r_intent = route_intent(question)
-    prefix = extract_prefix(question)
-    route_question = bool(r_intent or prefix)
+    route = route_context(question)
+    route_question = route["route_question"]
     # a route question still starts from the session: routes mean nothing on a down session
     intent = "bgp_state_check" if route_question else triage(question)
     log.info("Triage: starting intent %s (route question: %s, route intent %s, prefix %s)",
-             intent, route_question, r_intent, prefix)
-    ctx = {"host": host, "peer": peer, "question": question, "route_question": route_question,
-           "route_intent": r_intent or ("route_received_not_selected" if prefix else None), "prefix": prefix}
+             intent, route_question, route["route_intent"], route["prefix"])
+    ctx = {"host": host, "peer": peer, "question": question, **route}
     registry = ToolRegistry.load(client)
     checked, evidence = [], []
     visited, ran = set(), set()

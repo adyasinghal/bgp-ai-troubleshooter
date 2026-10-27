@@ -8,7 +8,7 @@ import logging
 from analyzer import llm_client, ml_engine, prompts, rules_engine
 from analyzer.llm_client import LLMUnavailable
 from analyzer.tool_registry import ToolCallError, ToolRegistry
-from analyzer.triage import llm_triage
+from analyzer.triage import llm_triage, route_context
 from analyzer.verdict import Verdict
 
 DEFAULT_MAX_STEPS = 6
@@ -39,8 +39,8 @@ def investigate(client, question: str, host: str, peer: str | None,
     registry = ToolRegistry.load(client)
     if not use_ml:
         registry.remove("ml_classify")
-    run = Investigation(client, registry, question, {"host": host, "peer": peer},
-                        max_steps, use_ml, trust_rules)
+    ctx = {"host": host, "peer": peer, "question": question, **route_context(question)}
+    run = Investigation(client, registry, question, ctx, max_steps, use_ml, trust_rules)
     try:
         return run.run()
     except LLMUnavailable as e:
@@ -123,6 +123,8 @@ class Investigation:
         tool_id = decision.get("tool_id") or ""
         try:
             args = self.registry.validate(tool_id, decision.get("args"))
+            if "prefix" in self.registry.tools[tool_id]["args_schema"] and self.ctx.get("prefix"):
+                args.setdefault("prefix", self.ctx["prefix"])   # as the rule chain does
             key = (tool_id, json.dumps(args, sort_keys=True))
             if self.registry.tools[tool_id]["kind"] == "internal":
                 key += (len(self._device_evidence()),)

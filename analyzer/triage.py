@@ -41,7 +41,7 @@ def route_intent(question: str) -> str | None:
         return "route_best_path_selection"
     if about_routes and re.search(r"not (?:being )?(?:selected|chosen|preferred|used|best|installed|received|"
                                   r"learn(?:ed|t)?|showing|there|in the table)|isn'?t (?:selected|chosen|there)"
-                                  r"|(?:not|n't) (?:receiving|learning|getting|seeing|accepting)"
+                                  r"|(?:not|n't) (?:\w+ )?(?:receiv|learn|get|see|accept)\w*"
                                   r"|\bno (?:routes?|prefix(?:es)?|paths?)\b|\bzero (?:routes|prefixes)\b"
                                   r"|missing|disappear|gone|lost|filtered|dropped|withdrawn|denied|rejected", q):
         return "route_received_not_selected"
@@ -50,6 +50,14 @@ def route_intent(question: str) -> str | None:
     if about_routes or re.search(r"local[- ]?pref|\bmed\b|as[- ]?path|next[- ]?hop|\bweight\b", q):
         return "route_leading_case"
     return None
+
+
+def route_context(question: str) -> dict:
+    """The route-question keys the rules engine reads from ctx."""
+    intent, prefix = route_intent(question), extract_prefix(question)
+    return {"route_question": bool(intent or prefix),
+            "route_intent": intent or ("route_received_not_selected" if prefix else None),
+            "prefix": prefix}
 
 
 def llm_triage(question: str, host: str, peer: str | None, registry) -> dict:
