@@ -18,6 +18,8 @@ from tools.tcp_port import TCPPortTool
 from tools.config import ConfigTool
 from tools.route_table import RouteTableTool
 from tools.route_map import RouteMapTool
+from tools.route_to_peer import RouteToPeerTool
+from tools.prefix_list import PrefixListTool
 from rules_db.rules_db import RulesDB
 
 app = FastAPI(title="Tool Cohort API", version="0.1.0")
@@ -30,6 +32,8 @@ tcp_tool = TCPPortTool()
 config_tool = ConfigTool()
 route_table_tool = RouteTableTool()
 route_map_tool = RouteMapTool()
+route_to_peer_tool = RouteToPeerTool()
+prefix_list_tool = PrefixListTool()
 
 
 class BGPStateRequest(BaseModel):
@@ -65,6 +69,17 @@ class RouteTableRequest(BaseModel):
 class RouteMapRequest(BaseModel):
     host: str
     name: str | None = None
+
+
+class RouteToPeerRequest(BaseModel):
+    host: str
+    peer: str
+
+
+class PrefixListRequest(BaseModel):
+    host: str
+    name: str | None = None
+    prefix: str | None = None
 
 
 @app.post("/tools/bgp/state")
@@ -106,6 +121,18 @@ def route_table(req: RouteTableRequest):
 @app.post("/tools/route/map")
 def route_map(req: RouteMapRequest):
     result = route_map_tool.run(req.host, req.name)
+    return result.to_dict()
+
+
+@app.post("/tools/route/peer")
+def route_to_peer(req: RouteToPeerRequest):
+    result = route_to_peer_tool.run(req.host, req.peer)
+    return result.to_dict()
+
+
+@app.post("/tools/route/prefix-list")
+def prefix_list(req: PrefixListRequest):
+    result = prefix_list_tool.run(req.host, req.name, req.prefix)
     return result.to_dict()
 
 

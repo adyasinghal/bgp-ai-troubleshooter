@@ -8,7 +8,7 @@ import logging
 from analyzer import llm_client, ml_engine, prompts, rules_engine
 from analyzer.llm_client import LLMUnavailable
 from analyzer.tool_registry import ToolCallError, ToolRegistry
-from analyzer.triage import llm_triage
+from analyzer.triage import llm_triage, route_context
 from analyzer.verdict import Verdict
 
 DEFAULT_MAX_STEPS = 6
@@ -21,8 +21,13 @@ ROUTE_CLASSES = {"route_not_selected", "route_filtered", "route_not_received", "
 # config_drift is generic, so the specific config faults count as agreeing;
 # a healthy session is consistent with any route answer
 AGREES_WITH = {
-    "config_drift": {"config_drift", "remote_as_mismatch", "neighbor_shutdown", "neighbor_missing"},
+    "config_drift": {"config_drift", "remote_as_mismatch", "neighbor_shutdown", "neighbor_missing",
+                     "auth_mismatch", "max_prefix_exceeded", "capability_mismatch", "router_id_conflict",
+                     "afi_not_negotiated"},
     "healthy": {"healthy"} | ROUTE_CLASSES,
+    "no_route_to_peer": {"no_route_to_peer", "interface_down", "tcp_unreachable"},
+    "peer_not_listening": {"peer_not_listening", "tcp_unreachable"},
+    "tcp_unreachable": {"tcp_unreachable", "peer_not_listening", "no_route_to_peer"},
 }
 
 log = logging.getLogger(__name__)
@@ -34,8 +39,8 @@ def investigate(client, question: str, host: str, peer: str | None,
     registry = ToolRegistry.load(client)
     if not use_ml:
         registry.remove("ml_classify")
-    run = Investigation(client, registry, question, {"host": host, "peer": peer},
-                        max_steps, use_ml, trust_rules)
+    ctx = {"host": host, "peer": peer, "question": question, **route_context(question)}
+    run = Investigation(client, registry, question, ctx, max_steps, use_ml, trust_rules)
     try:
         return run.run()
     except LLMUnavailable as e:
@@ -118,12 +123,17 @@ class Investigation:
         tool_id = decision.get("tool_id") or ""
         try:
             args = self.registry.validate(tool_id, decision.get("args"))
+            if "prefix" in self.registry.tools[tool_id]["args_schema"] and self.ctx.get("prefix"):
+                args.setdefault("prefix", self.ctx["prefix"])   # as the rule chain does
             key = (tool_id, json.dumps(args, sort_keys=True))
             if self.registry.tools[tool_id]["kind"] == "internal":
                 key += (len(self._device_evidence()),)
             if key in self.calls:
+                untried = [t for t in self.registry.tools if t not in self.checked
+                           and self.registry.tools[t]["kind"] == "device"]
                 raise ToolCallError(f"{tool_id} was already called with these args in step "
-                                    f"{self.calls[key]}; use that result")
+                                    f"{self.calls[key]}; use that result. Tools not called yet: "
+                                    f"{', '.join(untried) or 'none'}")
             if (tool_id != FIRST_TOOL and FIRST_TOOL in self.registry.tools
                     and FIRST_TOOL not in self.checked):
                 raise ToolCallError(f"call {FIRST_TOOL} first")
@@ -136,10 +146,16 @@ class Investigation:
         finding = rules_engine.evaluate(tool_id, result, self.ctx)
         if finding["decision"] == "continue" and "hint" not in finding:
             finding["suggested_next_intent"] = self.registry.next_intent_after(tool_id)
-        elif finding["decision"] == "healthy":
+        if finding.get("suggested_next_intent"):
+            # bgp_state points at bgp_state_<state>, whose only tool is bgp_state again: the model
+            # followed it, got rejected as a duplicate and was forced to conclude. Skip to the first
+            # intent with a tool that hasn't run yet.
+            finding["suggested_next_intent"] = self._next_new_intent(finding["suggested_next_intent"],
+                                                                     self.checked + [tool_id])
+        if finding["decision"] == "healthy":
             finding["note"] = ("The session is up. If the question is about the session, conclude; "
                                "if it is about routes or prefixes, continue with route_table.")
-        else:
+        elif finding["decision"] == "root_cause":
             finding["note"] = "The rule book considers this decided. Conclude unless other evidence contradicts it."
         summary = summarize(tool_id, result)
         if finding["decision"] != "continue":
@@ -157,6 +173,16 @@ class Investigation:
                            "tool": tool_id, "args": args, "summary": summary,
                            "result": result, "rule_finding": finding})
         return finding
+
+    def _next_new_intent(self, intent: str | None, ran: list[str]) -> str | None:
+        seen = set()
+        while intent and intent not in seen:
+            seen.add(intent)
+            rules = [r for r in self.registry.rules if r["intent"] == intent]
+            if not rules or any(r["tool_id"] not in ran for r in rules):
+                return intent
+            intent = min(rules, key=lambda r: r["priority"]).get("next_intent_on_fail")
+        return intent
 
     def _reject(self, n: int, decision: dict, reason: str):
         log.warning("Step %d rejected: %s", n, reason)
@@ -271,11 +297,25 @@ def summarize(tool_id: str, result: dict) -> str:
         down = [n for n, i in ifaces.items() if "down" in (i.get("link_state"), i.get("admin_state"))]
         return f"down: {', '.join(down)}" if down else f"{len(ifaces)} interface(s) up"
     if tool_id == "tcp_port":
-        return "port 179 reachable" if p.get("reachable") else "port 179 unreachable"
+        if p.get("reachable"):
+            return "port 179 reachable"
+        return "port 179 unreachable" + (f" ({p['reason']})" if p.get("reason") else "")
     if tool_id == "config":
         if not p.get("has_baseline"):
             return "running config read (no baseline)"
-        return "drifted from baseline" if p.get("drifted") else "matches baseline"
+        if not p.get("drifted"):
+            return "matches baseline"
+        return "drifted from baseline" + (f" ({p['severity']})" if p.get("severity") else "")
+    if tool_id == "route_to_peer":
+        if not p.get("has_route"):
+            return "no route to the peer"
+        if p.get("is_default"):
+            return "only the default route matches the peer"
+        return f"route {p.get('prefix')} via {p.get('protocol')} on {p.get('interface') or p.get('next_hop')}"
+    if tool_id == "prefix_list":
+        ev = p.get("evaluation") or {}
+        denied = [n for n, e in ev.items() if e.get("action") == "deny"]
+        return f"{p.get('count', 0)} list(s)" + (f", denying {p.get('prefix')}: {', '.join(denied)}" if denied else "")
     if tool_id == "route_table":
         if p.get("in_table") is False:
             return f"{p.get('prefix')} not in the BGP table"

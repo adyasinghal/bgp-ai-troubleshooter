@@ -4,9 +4,12 @@ Purpose: send bgp state -> runs `show bgp summary` on the FRR node via vtysh
 and parses out each peer's state (Established, Active, Connect, Idle...).
 """
 
+import ipaddress
 import re
 
 from tools.base_tool import BaseTool, ToolResult
+
+ROUTER_ID_RE = re.compile(r"BGP router identifier (?P<id>[\d.]+)")
 
 
 class BGPStateTool(BaseTool):
@@ -24,24 +27,37 @@ class BGPStateTool(BaseTool):
         # Column 9 (State/PfxRcd) carries the state and stays at the same index
         # no matter how many extra columns a given FRR version prints after it.
         # "Idle (Admin)", "Idle (PfxCt)", "(Policy)": the reason goes in state_reasons
-        peers, reasons = {}, {}
-        ip_re = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+        # "NoNeg": the session is up but no address family was negotiated with the peer
+        # (e.g. `no neighbor X activate`), so no prefixes are exchanged.
+        # A long IPv6 neighbor address is printed alone and the row continues on
+        # the next line; join the two before reading columns.
+        # Column 8 (Up/Down) is kept per peer: a young Established session was just reset.
+        peers, reasons, uptimes = {}, {}, {}
+        pending = None
 
         for line in output.splitlines():
             fields = line.split()
+            if pending:
+                fields, pending = [pending] + fields, None
+            if len(fields) == 1 and _is_ip(fields[0]):
+                pending = fields[0]
+                continue
             # a real peer line starts with an IP and has at least 10 columns
-            if len(fields) < 10 or not ip_re.match(fields[0]):
+            if len(fields) < 10 or not _is_ip(fields[0]):
                 continue
 
             neighbor = fields[0]
             state_field = fields[9]          # the State/PfxRcd column
             after = fields[10] if len(fields) > 10 else ""
 
-            if state_field.isdigit() or state_field == "(Policy)":
-                # a number = prefixes received; "(Policy)" = up but policy-filtered
+            if state_field.isdigit() or state_field in ("(Policy)", "NoNeg"):
+                # a number = prefixes received; "(Policy)" = up but policy-filtered;
+                # "NoNeg" = up but no address family negotiated
                 state = "Established"
                 if state_field == "(Policy)":
                     reasons[neighbor] = "Policy"
+                elif state_field == "NoNeg":
+                    reasons[neighbor] = "NoNeg"
             elif state_field in {"Active", "Connect", "Idle", "OpenSent", "OpenConfirm"}:
                 state = state_field
                 if after.startswith("(") and after.endswith(")"):
@@ -53,9 +69,20 @@ class BGPStateTool(BaseTool):
                 state = state_field           # unknown -> pass through as-is
 
             peers[neighbor] = state
+            uptimes[neighbor] = fields[8]
 
-        parsed = {"peers": peers, "state_reasons": {n: r for n, r in reasons.items() if r}}
+        router_id = ROUTER_ID_RE.search(output)
+        parsed = {"peers": peers, "state_reasons": {n: r for n, r in reasons.items() if r},
+                  "uptimes": uptimes, "router_id": router_id["id"] if router_id else None}
         if peer:
             parsed["queried_peer_state"] = peers.get(peer, "unknown")
             parsed["queried_peer_state_reason"] = parsed["state_reasons"].get(peer)
         return parsed
+
+
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False

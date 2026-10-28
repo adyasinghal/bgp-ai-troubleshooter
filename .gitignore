@@ -10,6 +10,11 @@ __pycache__/
 # Tests are kept locally only
 tests/
 pytest.ini
+
+# Old guides, kept locally only (covered by the README)
+docs/GuideToRun.md
+docs/InitialSetup.md
+docs/ToolDesign.md
 *.egg-info/
 .eggs/
 build/
