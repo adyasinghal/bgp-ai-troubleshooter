@@ -148,8 +148,8 @@ When a diagnosis looks uncertain, the analyzer says so and asks the engineer. Th
               Enter ------------> "pending"    --> answer later (CLI or API)
               n --> engineer writes a reply
                       v
-              agent re-investigates: the reply and every earlier       (analyzer/review.py,
-              conclusion go into its case as engineer_feedback          analyzer/agent.py)
+              agent picks up where it left off: earlier tool results  (analyzer/review.py,
+              carry over, plus every conclusion and the reply           analyzer/agent.py)
                       v
               new verdict, asked again (up to --max-rounds replies)
                       v   still wrong after the last reply

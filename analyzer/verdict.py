@@ -21,6 +21,7 @@ class Verdict:
     steps: list[dict] = field(default_factory=list)
     # engineer review (analyzer/confidence.py, analyzer/review.py)
     review: dict | None = None          # {"needed": bool, "reasons": [...]}
+    work: list[dict] = field(default_factory=list)   # full tool steps, carried into the next round
 
     def pretty(self) -> str:
         lines = [
@@ -47,7 +48,9 @@ class Verdict:
                 if s.get("rejected"):
                     lines.append(f"  {s['n']}. {s.get('tool') or '-'}: rejected ({s['rejected']})")
                 else:
-                    lines.append(f"  {s['n']}. {s['tool']} -> {s['summary']}")
+                    lines.append(f"  {s['n']}. {s['tool']} -> {s['summary']}"
+                                 + (f"  (from round {s['carried_over_from_round']})"
+                                    if s.get("carried_over_from_round") else ""))
                 if s.get("thought"):
                     lines.append(f"     why: {s['thought']}")
         if self.next_checks:

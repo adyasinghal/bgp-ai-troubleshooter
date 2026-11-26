@@ -12,8 +12,9 @@ The loop, for one run:
               engineer writes what is wrong / what to check / how to fix it
                       |
                       v
-              agent re-investigates with every earlier round + the reply
-              (analyzer/agent.py: engineer_feedback in the case)
+              agent picks up where it left off: the earlier tool results carry over as
+              steps already done, plus every earlier conclusion and the reply
+              (analyzer/agent.py: carried_steps, engineer_feedback)
                       |
                       +--> new verdict, asked again (up to max_rounds replies)
                       |
@@ -23,6 +24,7 @@ The loop, for one run:
 The same steps run from the CLI (analyzer.run, analyzer.feedback reply) and from the
 API (POST /feedback/{run_id}); analyzer/feedback.py stores every round.
 """
+import json
 import logging
 
 from analyzer import confidence, feedback
@@ -33,6 +35,7 @@ log = logging.getLogger(__name__)
 
 MAX_MESSAGE = 2000     # characters of engineer text passed to the LLM
 DEFAULT_MAX_ROUNDS = 3
+MAX_CARRIED = 8        # most tool results carried into the next round (prompt size, esp. on qwen)
 
 
 def summarize(verdict) -> dict:
@@ -45,6 +48,7 @@ def summarize(verdict) -> dict:
                if verdict.ml_prediction else None),
         "checked": verdict.checked,
         "steps": [f"{s.get('tool') or '-'}: {s.get('summary') or 'rejected (' + str(s.get('rejected')) + ')'}"
+                  + (f" (from round {s['carried_over_from_round']})" if s.get("carried_over_from_round") else "")
                   for s in verdict.steps],
         "notes": verdict.notes,
     }
@@ -71,14 +75,30 @@ def start(question: str, host: str, peer: str | None, url: str, mode: str,
 
 
 def _add_round(record: dict, verdict, review) -> None:
+    number = len(record["rounds"]) + 1
+    if verdict.work:
+        work = verdict.work
+    else:   # rules mode: no agent steps, so carry the rule chain's device evidence
+        work = [{"tool": e["tool"], "args": {}, "result": e} for e in verdict.evidence
+                if e.get("tool") in feedback.DEVICE_TOOLS]
     record["rounds"].append({
-        "round": len(record["rounds"]) + 1,
+        "round": number,
         "time": feedback.now(),
         "verdict": summarize(verdict),
         "review": review.to_dict(),
         "engineer_says": None,
+        "work": [{**w, "round": w.get("round") or number} for w in work],
     })
     record["evidence"] = verdict.evidence     # the evidence behind the latest verdict
+
+
+def _carried_steps(record: dict) -> list[dict]:
+    """The latest round's tool results (which include what it carried), newest kept per check."""
+    latest = {}
+    for w in record["rounds"][-1].get("work", []):
+        latest.pop((w["tool"], json.dumps(w.get("args") or {}, sort_keys=True)), None)
+        latest[(w["tool"], json.dumps(w.get("args") or {}, sort_keys=True))] = w
+    return list(latest.values())[-MAX_CARRIED:]
 
 
 def _feedback_for_agent(record: dict) -> list[dict]:
@@ -119,7 +139,8 @@ def reply(client, record: dict, message: str, max_rounds: int = DEFAULT_MAX_ROUN
     verdict = investigate(client, record["question"], record["host"], record["peer"],
                           max_steps=record.get("max_steps", DEFAULT_MAX_STEPS),
                           use_ml=record.get("use_ml", True),
-                          engineer_feedback=_feedback_for_agent(record))
+                          engineer_feedback=_feedback_for_agent(record),
+                          carried_steps=_carried_steps(record))
     review = confidence.assess(verdict, record.get("ask_on", "low"))
     verdict.review = review.to_dict()
     if any("fell back to the rule chain" in n for n in verdict.notes):

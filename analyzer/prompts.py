@@ -54,6 +54,7 @@ How to work:
 - If the tool output contradicts the operator's description, trust the tool output and point out the difference in root_cause.
 - The tools only see this router. If the evidence points at the peer, say so and give next_checks to run on the peer.
 - engineer_feedback, when present, means a network engineer reviewed your earlier conclusion because it looked uncertain, and replied. Each entry has what you concluded then, the checks you ran, and engineer_says. Treat the latest engineer_says as strong direction from someone who can see more than the tools: run the checks they ask for, and test the cause they suggest first. Still verify it with a tool before concluding; if the evidence contradicts the engineer, say so plainly in root_cause instead of agreeing. If they say what the fix is or how to do it, use that in suggested_fix once the evidence supports it, with exact FRR commands.
+- Steps marked carried_over_from_round were run in an earlier round of this investigation: their results are evidence you already have, and the tools in them count as already called. Pick up from there: don't call them again unless the engineer says something has changed, and go straight to the checks the engineer asked for.
 
 Common causes of a stuck session: an interface down, no route or an ACL blocking TCP 179, a remote-as mismatch, a neighbor configured on only one side, an administratively shut down neighbor, a wrong neighbor IP or update-source, eBGP multihop/TTL problems, an MD5 password mismatch, and a router-id conflict.
 
