@@ -35,12 +35,22 @@ log = logging.getLogger(__name__)
 
 def investigate(client, question: str, host: str, peer: str | None,
                 max_steps: int = DEFAULT_MAX_STEPS, use_ml: bool = True,
-                trust_rules: bool = False) -> Verdict:
+                trust_rules: bool = False,
+                engineer_feedback: list[dict] | None = None,
+                carried_steps: list[dict] | None = None) -> Verdict:
+    """engineer_feedback: earlier rounds an engineer reviewed, each with what the agent
+    concluded and the engineer's reply (see analyzer/review.py). The agent re-investigates
+    with them in its case, so it follows the engineer's direction but still checks it.
+
+    carried_steps: tool results from the earlier round(s). They start this investigation
+    as steps already done (marked carried_over_from_round), so the agent picks up where
+    it left off instead of starting over, and they don't use up its step budget."""
     registry = ToolRegistry.load(client)
     if not use_ml:
         registry.remove("ml_classify")
     ctx = {"host": host, "peer": peer, "question": question, **route_context(question)}
-    run = Investigation(client, registry, question, ctx, max_steps, use_ml, trust_rules)
+    run = Investigation(client, registry, question, ctx, max_steps, use_ml, trust_rules,
+                        engineer_feedback or [], carried_steps or [])
     try:
         return run.run()
     except LLMUnavailable as e:
@@ -53,7 +63,9 @@ def investigate(client, question: str, host: str, peer: str | None,
 
 class Investigation:
     def __init__(self, client, registry: ToolRegistry, question: str, ctx: dict,
-                 max_steps: int, use_ml: bool, trust_rules: bool):
+                 max_steps: int, use_ml: bool, trust_rules: bool,
+                 engineer_feedback: list[dict] | None = None,
+                 carried_steps: list[dict] | None = None):
         self.client = client
         self.registry = registry
         self.question = question
@@ -61,6 +73,7 @@ class Investigation:
         self.max_steps = max_steps
         self.use_ml = use_ml
         self.trust_rules = trust_rules
+        self.engineer_feedback = engineer_feedback or []
         self.model = None
         self.triage: dict | None = None
         self.steps: list[dict] = []
@@ -68,17 +81,48 @@ class Investigation:
         self.checked: list[str] = []
         self.findings: list[dict] = []
         self.calls: dict[tuple, int] = {}
+        self._seed(carried_steps or [])
+
+    def _seed(self, carried: list[dict]):
+        """Start from an earlier round's tool results, as steps already done."""
+        for c in carried:
+            tool_id = c.get("tool")
+            if self.registry.tools.get(tool_id, {}).get("kind") != "device" or not c.get("result"):
+                continue
+            r = c["result"]
+            result = {"success": r.get("success"), "error": r.get("error"),
+                      "parsed": r.get("parsed"), "raw_output": r.get("raw_output")}
+            finding = c.get("rule_finding") or rules_engine.evaluate(tool_id, result, self.ctx)
+            summary = c.get("summary") or summarize(tool_id, result)
+            self.checked.append(tool_id)
+            self.findings.append(finding)
+            self.evidence.append({"tool": tool_id, **result})
+            self.steps.append({"n": len(self.steps) + 1, "thought": c.get("thought"),
+                               "intent": c.get("intent"), "tool": tool_id, "args": c.get("args") or {},
+                               "summary": summary, "result": result, "rule_finding": finding,
+                               "carried_over_from_round": c.get("round")})
+        if self.steps:
+            log.info("Carried over %d step(s) from earlier rounds: %s", len(self.steps),
+                     ", ".join(s["tool"] for s in self.steps))
 
     def run(self) -> Verdict:
         log.info("Agent start: host=%s peer=%s max_steps=%d",
                  self.ctx["host"], self.ctx["peer"], self.max_steps)
-        self.triage = llm_triage(self.question, self.ctx["host"], self.ctx["peer"], self.registry)
-        if not self.triage["in_scope"]:
+        triage_question = self.question
+        if self.engineer_feedback:   # the engineer's reply can change what to suspect first
+            triage_question += "\n\nEngineer's reply to the last diagnosis: " + \
+                self.engineer_feedback[-1]["engineer_says"]
+            log.info("Re-investigating with engineer feedback (round %d): %s",
+                     len(self.engineer_feedback) + 1, self.engineer_feedback[-1]["engineer_says"])
+        self.triage = llm_triage(triage_question, self.ctx["host"], self.ctx["peer"], self.registry)
+        if not self.triage["in_scope"] and not self.engineer_feedback:
             return Verdict(False, "This doesn't look like a question about this router's BGP sessions.",
                            "Ask about a BGP session, its peer, or the links and config behind it.",
                            source="agent", triage=self.triage)
-        for n in range(1, self.max_steps + 1):
-            decision = self._decide(steps_left=self.max_steps - n + 1)
+        offset = len(self.steps)          # carried-over steps don't use up the budget
+        for i in range(self.max_steps):
+            n = offset + i + 1
+            decision = self._decide(steps_left=self.max_steps - i)
             action = decision.get("action")
             if action == "conclude":
                 problem = self._conclusion_problem(decision)
@@ -109,7 +153,7 @@ class Investigation:
         return decision
 
     def _case(self) -> dict:
-        return {
+        case = {
             "question": self.question,
             "host": self.ctx["host"],
             "peer": self.ctx["peer"],
@@ -118,6 +162,9 @@ class Investigation:
             "tools": self.registry.for_prompt(),
             "steps": [_step_for_prompt(s) for s in self.steps],
         }
+        if self.engineer_feedback:
+            case["engineer_feedback"] = self.engineer_feedback
+        return case
 
     def _call(self, n: int, decision: dict) -> dict | None:
         tool_id = decision.get("tool_id") or ""
@@ -136,6 +183,15 @@ class Investigation:
                                     f"{', '.join(untried) or 'none'}")
             if (tool_id != FIRST_TOOL and FIRST_TOOL in self.registry.tools
                     and FIRST_TOOL not in self.checked):
+                if self.engineer_feedback:
+                    # In a re-investigation the model may think the first check is already done.
+                    # Run it now instead of rejecting the step (a small model can keep retrying
+                    # the same rejected call until the step budget runs out).
+                    log.info("Step %d: %s asked before %s; running %s first", n, tool_id,
+                             FIRST_TOOL, FIRST_TOOL)
+                    return self._call(n, {**decision, "tool_id": FIRST_TOOL, "args": {},
+                                          "thought": f"[{FIRST_TOOL} runs first; {tool_id} was asked for] "
+                                                     + (decision.get("thought") or "")})
                 raise ToolCallError(f"call {FIRST_TOOL} first")
         except ToolCallError as e:
             self._reject(n, decision, str(e))
@@ -204,6 +260,8 @@ class Investigation:
             raise LLMUnavailable(f"the model's conclusion is missing {', '.join(missing)}")
         d = decision["diagnosis"]
         notes = [f"Diagnosed by {self.model}"]
+        if self.engineer_feedback:
+            notes.append(f"Re-investigated with engineer feedback ({len(self.engineer_feedback)} round(s))")
         resolved = bool(d["resolved"])
         if not self.evidence:
             resolved = False
@@ -223,7 +281,7 @@ class Investigation:
                        ml_prediction=None if d["fault_class"] in ROUTE_CLASSES else self._ml_opinion(),
                        next_checks=list(d["next_checks"]), notes=notes,
                        fault_class=d["fault_class"], rules_agree=rules_agree,
-                       triage=self.triage, steps=self._public_steps())
+                       triage=self.triage, steps=self._public_steps(), work=self._work())
 
     def _rules_verdict(self, finding: dict) -> Verdict:
         log.info("Rule finding %s after %s; stopping (--trust-rules)", finding["decision"], self.checked[-1])
@@ -231,7 +289,7 @@ class Investigation:
                        source="rules", ml_prediction=self._ml_opinion(),
                        notes=["Stopped at the first rule finding (--trust-rules)"],
                        fault_class=finding["fault_class"], triage=self.triage,
-                       steps=self._public_steps())
+                       steps=self._public_steps(), work=self._work())
 
     def _device_evidence(self) -> list[dict]:
         return [e for e in self.evidence
@@ -246,8 +304,15 @@ class Investigation:
         return ml.to_dict()
 
     def _public_steps(self) -> list[dict]:
-        keys = ("n", "thought", "intent", "tool", "args", "summary", "rejected")
+        keys = ("n", "thought", "intent", "tool", "args", "summary", "rejected", "carried_over_from_round")
         return [{k: s[k] for k in keys if k in s} for s in self.steps]
+
+    def _work(self) -> list[dict]:
+        """Every tool step with its full result, for the next round to carry over."""
+        return [{"tool": s["tool"], "args": s["args"], "thought": s.get("thought"),
+                 "intent": s.get("intent"), "summary": s["summary"], "result": s["result"],
+                 "rule_finding": s["rule_finding"], "round": s.get("carried_over_from_round")}
+                for s in self.steps if "result" in s]
 
 
 def _missing_diagnosis_fields(decision: dict) -> list[str]:
@@ -268,8 +333,11 @@ def _step_for_prompt(step: dict) -> dict:
     shown = {"success": r.get("success"), "error": r.get("error"), "parsed": parsed}
     if r.get("raw_output"):
         shown["raw_output"] = _trim(r["raw_output"])
-    return {"n": step["n"], "thought": step["thought"], "intent": step["intent"], "tool": step["tool"],
-            "args": step["args"], "result": shown, "rule_finding": step["rule_finding"]}
+    out = {"n": step["n"], "thought": step["thought"], "intent": step["intent"], "tool": step["tool"],
+           "args": step["args"], "result": shown, "rule_finding": step["rule_finding"]}
+    if step.get("carried_over_from_round"):
+        out["carried_over_from_round"] = step["carried_over_from_round"]
+    return out
 
 
 def _trim(text: str) -> str:

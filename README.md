@@ -136,6 +136,41 @@ It's trained on synthetic cases for now, so its confidence is indicative. The LL
 
 A free local model (`qwen2.5:7b`) served by Ollama by default, or Claude. All LLM calls go through `analyzer/llm_client.py`. In agent mode the LLM is called once per step (a few seconds each); in rules mode only when the rules and ML are stuck.
 
+### Engineer review (low-confidence feedback)
+
+When a diagnosis looks uncertain, the analyzer says so and asks the engineer. The engineer can confirm it, or reply in plain language with what's wrong, what to check or how to fix it; the agent then re-investigates with that reply.
+
+```
+[Verdict] --> confidence check (analyzer/confidence.py)
+                 |-- confident --> done (saved as "auto")
+                 v   uncertain: say why, ask "Is it right?"
+              y ----------------> "confirmed"  --> ML training case
+              Enter ------------> "pending"    --> answer later (CLI or API)
+              n --> engineer writes a reply
+                      v
+              agent picks up where it left off: earlier tool results  (analyzer/review.py,
+              carry over, plus every conclusion and the reply           analyzer/agent.py)
+                      v
+              new verdict, asked again (up to --max-rounds replies)
+                      v   still wrong after the last reply
+              engineer picks the real fault class --> "corrected" --> ML training case
+```
+
+A verdict is uncertain when any of these fire (the LLM's own rating is the weakest signal; disagreement between the engines is the strongest):
+
+| Signal | Fires when |
+|---|---|
+| `unresolved` | no root cause was found |
+| `self_rated` | the LLM rated its confidence low (also medium with `--ask-on medium`) |
+| `rules_disagree` | the agent's fault class doesn't match the rule book's finding |
+| `unsupported` | the LLM concluded, but no rule finding backs it and the ML classifier doesn't agree with confidence >= 0.6 |
+| `ml_disagrees` | the ML classifier names a different fault class with confidence >= 0.6 |
+| `weak_ml_decision` | the ML classifier decided the case with confidence < 0.85 |
+| `tentative_rule` | no rule was conclusive; the rule chain used its best guess |
+| `other_class` | the fault class is `other` |
+
+The agent treats the engineer's reply as strong direction (it runs the checks asked for and tests the suggested cause first), but still verifies it with a tool and says so if the evidence disagrees. Every run, reply and rating is saved under `feedback/` (`analyzer/feedback.py`). Confirmed and corrected runs are exported to `feedback/cases.jsonl` and added to the ML engine's training set the next time it is trained.
+
 ---
 
 ## 2. Rule book
@@ -425,10 +460,27 @@ ML opinion:    healthy (1.00)
 | `--no-llm` | Skip the LLM entirely (implies `--mode rules`) |
 | `--url` | Where the REST API is (default `http://localhost:8000`) |
 | `--log-dir` | Where to write the run log (default `logs/`) |
+| `--ask-on low\|medium\|always\|never` | When to ask the engineer to check the diagnosis (default `low`: when any warning sign fires) |
+| `--no-ask` | Flag uncertain runs as pending but don't prompt (scripts, batch test runs) |
+| `--max-rounds N` | Most engineer replies per run (default 3) |
 
 Every run writes a log to `logs/run_<date>-<time>.log` (the path is printed as the last line). It records each step: agent decisions, every tool call with its payload, result and raw output, rule findings, the ML prediction, LLM calls and token usage, and the final verdict. If a run crashes, the traceback is there too.
 
 The first run trains the ML model (about a second) and saves it to `analyzer/models/`. Later runs reuse it.
+
+Every run also prints a run id. If the diagnosis was flagged as uncertain and you didn't answer at the prompt, answer later:
+
+```bash
+python3 -m analyzer.feedback pending                       # runs waiting for review
+python3 -m analyzer.feedback reply <run_id> "the neighbor is shut down on r2, check bgp_neighbor"
+python3 -m analyzer.feedback rate <run_id> --correct
+python3 -m analyzer.feedback rate <run_id> --wrong --actual auth_mismatch --comment "MD5 key differs"
+python3 -m analyzer.feedback stats                         # is the confidence check asking about the right runs?
+```
+
+The same is on the API for a dashboard: `GET /feedback/pending`, `GET /feedback/{run_id}`, `POST /feedback/{run_id}` with `{"message": "..."}` (re-investigates and returns the new verdict) or `{"correct": false, "actual_fault_class": "...", "comment": "..."}`, and `GET /feedback/stats`.
+
+`stats` reports how often runs are flagged, accuracy of flagged vs. unflagged first diagnoses (rate a few unflagged runs too, so there is something to compare), how often each warning sign fired on a diagnosis that was right anyway, and how many replies it takes to reach a confirmed answer.
 
 ---
 
@@ -551,7 +603,10 @@ The model is trained on synthetic cases. To retrain, and to add real labelled ca
 ```bash
 python3 -m analyzer.ml_engine train                    # synthetic only
 python3 -m analyzer.ml_engine train --cases cases.jsonl
+python3 -m analyzer.ml_engine train --no-feedback     # leave out the engineer-confirmed cases
 ```
+
+Cases engineers confirmed or corrected (`feedback/cases.jsonl`) are included automatically.
 
 It prints per-class precision/recall on a held-out split, then saves the model. If the features or fault classes in `ml_engine.py` change, an old saved model is retrained automatically on the next run.
 
@@ -644,9 +699,12 @@ bgp-ai-troubleshooter/
 │   ├── llm_client.py       # one entry point for LLM calls (Ollama or Claude)
 │   ├── llm_escalation.py   # rules mode: hands unresolved cases to the LLM
 │   ├── rest_client.py      # calls the REST API over HTTP
-│   └── verdict.py          # the root cause / fix output
+│   ├── verdict.py          # the root cause / fix output
+│   ├── confidence.py       # decides whether a verdict needs an engineer's review
+│   ├── review.py           # asks the engineer; re-investigates with their reply
+│   └── feedback.py         # stores runs, replies and ratings; stats; ML training cases
 ├── api/
-│   └── main.py             # REST API: tool endpoints and the rule book
+│   └── main.py             # REST API: tool endpoints, the rule book, engineer feedback
 ├── rules_db/
 │   ├── schema.sql          # the rule book and tool catalog
 │   └── rules_db.py         # loads it into SQLite

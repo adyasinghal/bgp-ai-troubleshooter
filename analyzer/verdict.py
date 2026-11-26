@@ -19,6 +19,9 @@ class Verdict:
     rules_agree: bool | None = None     # None when no rule decided
     triage: dict | None = None
     steps: list[dict] = field(default_factory=list)
+    # engineer review (analyzer/confidence.py, analyzer/review.py)
+    review: dict | None = None          # {"needed": bool, "reasons": [...]}
+    work: list[dict] = field(default_factory=list)   # full tool steps, carried into the next round
 
     def pretty(self) -> str:
         lines = [
@@ -45,11 +48,16 @@ class Verdict:
                 if s.get("rejected"):
                     lines.append(f"  {s['n']}. {s.get('tool') or '-'}: rejected ({s['rejected']})")
                 else:
-                    lines.append(f"  {s['n']}. {s['tool']} -> {s['summary']}")
+                    lines.append(f"  {s['n']}. {s['tool']} -> {s['summary']}"
+                                 + (f"  (from round {s['carried_over_from_round']})"
+                                    if s.get("carried_over_from_round") else ""))
                 if s.get("thought"):
                     lines.append(f"     why: {s['thought']}")
         if self.next_checks:
             lines.append("Next checks:")
             lines += [f"  - {c}" for c in self.next_checks]
         lines += [f"Note:          {n}" for n in self.notes]
+        if self.review and self.review.get("needed"):
+            lines.append("Needs review:  yes, an engineer should check this")
+            lines += [f"  - {r}" for r in self.review["reasons"]]
         return "\n".join(lines)
