@@ -163,6 +163,7 @@ A verdict is uncertain when any of these fire (the LLM's own rating is the weake
 | `unresolved` | no root cause was found |
 | `self_rated` | the LLM rated its confidence low (also medium with `--ask-on medium`) |
 | `rules_disagree` | the agent's fault class doesn't match the rule book's finding |
+| `unsupported` | the LLM concluded, but no rule finding backs it and the ML classifier doesn't agree with confidence >= 0.6 |
 | `ml_disagrees` | the ML classifier names a different fault class with confidence >= 0.6 |
 | `weak_ml_decision` | the ML classifier decided the case with confidence < 0.85 |
 | `tentative_rule` | no rule was conclusive; the rule chain used its best guess |

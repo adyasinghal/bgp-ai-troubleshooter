@@ -8,6 +8,8 @@ one of them is wrong. A verdict is sent for review when any signal fires:
   - unresolved          no root cause was found
   - self-rated          the LLM rated its own confidence at or below the ask level
   - rules disagree      the agent's fault class doesn't match the rule book's finding
+  - unsupported         the LLM concluded, but no rule finding backs it and the ML classifier
+                        doesn't confidently agree, so nothing besides the LLM supports the answer
   - ML disagrees        the ML classifier confidently names a different fault class
   - weak ML decision    the ML classifier decided the case, but only just
   - tentative rule      no rule was conclusive; the chain fell back to its best guess
@@ -70,6 +72,13 @@ def assess(verdict, ask_on: str = "low") -> Review:
     elif (ml and fc and fc not in ML_CLASSES_EXCLUDED and ml.get("label") not in ML_CLASSES_EXCLUDED
           and ml.get("confidence", 0) >= ML_DISAGREE_MIN and not _compatible(fc, ml["label"])):
         flag("ml_disagrees", f"the ML classifier thinks it is {ml['label']} ({ml['confidence']:.2f}), not {fc}")
+
+    ml_backs = bool(ml and fc and ml.get("confidence", 0) >= ML_DISAGREE_MIN
+                    and _compatible(fc, ml.get("label", "")))
+    if (verdict.source in ("agent", "llm") and verdict.resolved
+            and verdict.rules_agree is None and not ml_backs):
+        flag("unsupported", "nothing backs this answer: no rule finding supports it "
+                            "and the ML classifier doesn't confidently agree")
 
     if any("No rule was conclusive" in n for n in verdict.notes):
         flag("tentative_rule", "no rule was conclusive; this is the rule chain's best guess")
