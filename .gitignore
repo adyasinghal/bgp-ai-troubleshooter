@@ -41,6 +41,9 @@ logs/
 # Engineer feedback: run records, replies, ratings, cases for ML (analyzer/feedback.py)
 feedback/
 
+# Outputs of tests/run_feedback_cases.sh
+test_results/
+
 # Trained by the ML engine on first use (retrain: python3 -m analyzer.ml_engine train)
 analyzer/models/
 
