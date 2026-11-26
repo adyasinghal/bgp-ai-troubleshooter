@@ -35,12 +35,17 @@ log = logging.getLogger(__name__)
 
 def investigate(client, question: str, host: str, peer: str | None,
                 max_steps: int = DEFAULT_MAX_STEPS, use_ml: bool = True,
-                trust_rules: bool = False) -> Verdict:
+                trust_rules: bool = False,
+                engineer_feedback: list[dict] | None = None) -> Verdict:
+    """engineer_feedback: earlier rounds an engineer reviewed, each with what the agent
+    concluded and the engineer's reply (see analyzer/review.py). The agent re-investigates
+    with them in its case, so it follows the engineer's direction but still checks it."""
     registry = ToolRegistry.load(client)
     if not use_ml:
         registry.remove("ml_classify")
     ctx = {"host": host, "peer": peer, "question": question, **route_context(question)}
-    run = Investigation(client, registry, question, ctx, max_steps, use_ml, trust_rules)
+    run = Investigation(client, registry, question, ctx, max_steps, use_ml, trust_rules,
+                        engineer_feedback or [])
     try:
         return run.run()
     except LLMUnavailable as e:
@@ -53,7 +58,8 @@ def investigate(client, question: str, host: str, peer: str | None,
 
 class Investigation:
     def __init__(self, client, registry: ToolRegistry, question: str, ctx: dict,
-                 max_steps: int, use_ml: bool, trust_rules: bool):
+                 max_steps: int, use_ml: bool, trust_rules: bool,
+                 engineer_feedback: list[dict] | None = None):
         self.client = client
         self.registry = registry
         self.question = question
@@ -61,6 +67,7 @@ class Investigation:
         self.max_steps = max_steps
         self.use_ml = use_ml
         self.trust_rules = trust_rules
+        self.engineer_feedback = engineer_feedback or []
         self.model = None
         self.triage: dict | None = None
         self.steps: list[dict] = []
@@ -72,8 +79,14 @@ class Investigation:
     def run(self) -> Verdict:
         log.info("Agent start: host=%s peer=%s max_steps=%d",
                  self.ctx["host"], self.ctx["peer"], self.max_steps)
-        self.triage = llm_triage(self.question, self.ctx["host"], self.ctx["peer"], self.registry)
-        if not self.triage["in_scope"]:
+        triage_question = self.question
+        if self.engineer_feedback:   # the engineer's reply can change what to suspect first
+            triage_question += "\n\nEngineer's reply to the last diagnosis: " + \
+                self.engineer_feedback[-1]["engineer_says"]
+            log.info("Re-investigating with engineer feedback (round %d): %s",
+                     len(self.engineer_feedback) + 1, self.engineer_feedback[-1]["engineer_says"])
+        self.triage = llm_triage(triage_question, self.ctx["host"], self.ctx["peer"], self.registry)
+        if not self.triage["in_scope"] and not self.engineer_feedback:
             return Verdict(False, "This doesn't look like a question about this router's BGP sessions.",
                            "Ask about a BGP session, its peer, or the links and config behind it.",
                            source="agent", triage=self.triage)
@@ -109,7 +122,7 @@ class Investigation:
         return decision
 
     def _case(self) -> dict:
-        return {
+        case = {
             "question": self.question,
             "host": self.ctx["host"],
             "peer": self.ctx["peer"],
@@ -118,6 +131,9 @@ class Investigation:
             "tools": self.registry.for_prompt(),
             "steps": [_step_for_prompt(s) for s in self.steps],
         }
+        if self.engineer_feedback:
+            case["engineer_feedback"] = self.engineer_feedback
+        return case
 
     def _call(self, n: int, decision: dict) -> dict | None:
         tool_id = decision.get("tool_id") or ""
@@ -204,6 +220,8 @@ class Investigation:
             raise LLMUnavailable(f"the model's conclusion is missing {', '.join(missing)}")
         d = decision["diagnosis"]
         notes = [f"Diagnosed by {self.model}"]
+        if self.engineer_feedback:
+            notes.append(f"Re-investigated with engineer feedback ({len(self.engineer_feedback)} round(s))")
         resolved = bool(d["resolved"])
         if not self.evidence:
             resolved = False

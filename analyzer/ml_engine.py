@@ -14,6 +14,8 @@ failure patterns (see _sample). As real cases are collected, label them and
 retrain:
     python3 -m analyzer.ml_engine train --cases cases.jsonl
 where each line is {"evidence": [...], "peer": "172.20.20.3", "label": "remote_as_mismatch"}.
+Cases an engineer confirmed or corrected (feedback/cases.jsonl, see analyzer/feedback.py)
+are added automatically; pass --no-feedback to train on synthetic data only.
 """
 import argparse
 import json
@@ -466,11 +468,23 @@ def _load_cases(path: Path):
 
 # --- train / predict ---
 
-def train(cases_path: Path | None = None, verbose: bool = False) -> RandomForestClassifier:
+def train(cases_path: Path | None = None, verbose: bool = False,
+          use_feedback: bool = True) -> RandomForestClassifier:
     X, y = _synthetic_dataset()
-    if cases_path:
-        cx, cy = _load_cases(cases_path)
+    paths = [cases_path] if cases_path else []
+    if use_feedback:
+        from analyzer import feedback
+        if feedback.CASES_PATH.exists() and feedback.CASES_PATH not in paths:
+            paths.append(feedback.CASES_PATH)
+    for path in paths:
+        cx, cy = _load_cases(path)
+        unknown = sorted(set(cy) - set(FAULTS))
+        if unknown:
+            raise ValueError(f"{path} has labels the model doesn't know: {', '.join(unknown)}")
         X, y = X + cx, y + cy
+        log.info("Added %d real cases from %s", len(cy), path)
+        if verbose:
+            print(f"Added {len(cy)} real cases from {path}")
 
     if verbose:
         X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
@@ -524,6 +538,8 @@ if __name__ == "__main__":
     sub = ap.add_subparsers(dest="cmd", required=True)
     tr = sub.add_parser("train")
     tr.add_argument("--cases", type=Path, help="JSONL of real labelled cases to add")
+    tr.add_argument("--no-feedback", action="store_true",
+                    help="don't add the engineer-confirmed cases in feedback/cases.jsonl")
     args = ap.parse_args()
-    train(args.cases, verbose=True)
+    train(args.cases, verbose=True, use_feedback=not args.no_feedback)
     print(f"Saved model to {MODEL_PATH}")

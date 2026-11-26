@@ -8,8 +8,10 @@ from the architecture diagram, sitting on top of the "REST API layer /
 Network devices" boundary (device_client.py).
 """
 
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tools.bgp_state import BGPStateTool
 from tools.bgp_neighbor import BGPNeighborTool
@@ -171,6 +173,66 @@ def get_rule_for_intent(intent: str):
         "likely_causes": rule.likely_causes,
         "verification": rule.verification,
     }
+
+
+# --- Engineer feedback on uncertain diagnoses (analyzer/review.py, analyzer/feedback.py) ---
+# A run the analyzer wasn't confident about waits as "pending". A dashboard lists them,
+# shows the diagnosis and why it was flagged, and sends the engineer's reply or rating.
+
+class FeedbackRequest(BaseModel):
+    message: Optional[str] = Field(None, max_length=2000,
+                                   description="what's wrong, what to check, or how to fix it; "
+                                               "the agent re-investigates with it")
+    correct: Optional[bool] = Field(None, description="the engineer's verdict on the latest diagnosis")
+    actual_fault_class: Optional[str] = Field(None, description="the real fault class, when correct is false")
+    comment: Optional[str] = Field(None, max_length=2000)
+
+
+def _run_or_404(run_id: str) -> dict:
+    from analyzer import feedback
+    try:
+        return feedback.load(run_id)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/feedback/pending")
+def feedback_pending():
+    from analyzer import feedback
+    return {"pending": feedback.pending()}
+
+
+@app.get("/feedback/stats")
+def feedback_stats():
+    from analyzer import feedback
+    return feedback.stats()
+
+
+@app.get("/feedback/{run_id}")
+def feedback_run(run_id: str):
+    return _run_or_404(run_id)
+
+
+@app.post("/feedback/{run_id}")
+def feedback_reply(run_id: str, req: FeedbackRequest):
+    """Send a reply (re-investigates and returns the new diagnosis) or a rating, not both."""
+    from analyzer import review
+    from analyzer.rest_client import RestClient
+    record = _run_or_404(run_id)
+    if (req.message is None) == (req.correct is None):
+        raise HTTPException(status_code=422, detail="send either message or correct")
+    try:
+        if req.correct is not None:
+            return {"run_id": run_id, "operator": review.rate(record, req.correct,
+                                                              req.actual_fault_class, req.comment)}
+        # The agent calls this same API for its tools: this endpoint is sync, so FastAPI runs
+        # it in a worker thread and those calls are served alongside it.
+        verdict = review.reply(RestClient(record["url"]), record, req.message)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"run_id": run_id, "round": len(record["rounds"]), "status": record["status"],
+            "verdict": record["rounds"][-1]["verdict"], "review": verdict.review,
+            "text": verdict.pretty()}
 
 
 @app.get("/health")

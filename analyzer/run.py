@@ -1,9 +1,12 @@
 import argparse
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 
+from analyzer import review
 from analyzer.agent import DEFAULT_MAX_STEPS, investigate
+from analyzer.confidence import ASK_LEVELS
 from analyzer.rest_client import RestClient
 from analyzer.rules_engine import diagnose
 
@@ -43,6 +46,14 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--no-llm", action="store_true", help="skip the LLM entirely (implies --mode rules)")
     ap.add_argument("--log-dir", type=Path, default=LOG_DIR,
                     help=f"where to write this run's log file (default: {LOG_DIR})")
+    ap.add_argument("--ask-on", choices=ASK_LEVELS, default="low",
+                    help="when to ask the engineer to check the diagnosis: low (default) = when any "
+                         "warning sign fires; medium = also when the LLM rates itself medium; "
+                         "always; never")
+    ap.add_argument("--no-ask", action="store_true",
+                    help="flag uncertain runs for review but don't prompt (for scripts and test runs)")
+    ap.add_argument("--max-rounds", type=int, default=review.DEFAULT_MAX_ROUNDS,
+                    help=f"most engineer replies per run (default {review.DEFAULT_MAX_ROUNDS})")
     args = ap.parse_args(argv)
     if args.no_llm:
         args.mode = "rules"
@@ -63,10 +74,19 @@ def main(argv: list[str] | None = None):
         log.exception("Run failed")
         print(f"Log file:      {log_path}")
         raise
+    record = review.start(args.question, args.host, args.peer, args.url, args.mode, verdict,
+                          ask_on=args.ask_on, max_steps=args.max_steps, use_ml=not args.no_ml,
+                          use_llm=not args.no_llm)
     log.info("Verdict:\n%s", verdict.pretty())
-    log.info("Run finished")
     print(verdict.pretty())
+    print(f"Run id:        {record['run_id']}")
     print(f"Log file:      {log_path}")
+    if verdict.review["needed"]:
+        if args.no_ask or not sys.stdin.isatty():
+            print(f"Waiting for review: python3 -m analyzer.feedback reply {record['run_id']} \"...\"")
+        else:
+            verdict = review.interactive(client, record, verdict, max_rounds=args.max_rounds)
+    log.info("Run finished: status=%s rounds=%d", record["status"], len(record["rounds"]))
 
 
 if __name__ == "__main__":
